@@ -261,6 +261,15 @@
 		9DFB06961D7470C0006D48FC /* ADJUtil.h in Headers */ = {isa = PBXBuildFile; fileRef = 9DFB06571D7470C0006D48FC /* ADJUtil.h */; };
 		9DFB06971D7470C0006D48FC /* ADJUtil.m in Sources */ = {isa = PBXBuildFile; fileRef = 9DFB06581D7470C0006D48FC /* ADJUtil.m */; };
 		9DFB06981D7470C0006D48FC /* Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 9DFB06591D7470C0006D48FC /* Info.plist */; };
+		D493CA991D81ABA1002F4663 /* Adjust.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 9DF9C9041D6F3CA5008E362F /* Adjust.h */; };
+		D493CA9A1D81ABA8002F4663 /* ADJEvent.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 9DF9C8E41D6F3CA5008E362F /* ADJEvent.h */; };
+		D493CA9B1D81ABAF002F4663 /* ADJConfig.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 960A8BB71A029A8000F2BB95 /* ADJConfig.h */; };
+		D493CA9C1D81ABB4002F4663 /* ADJLogger.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 96E5E37318BBB48A008E7B30 /* ADJLogger.h */; };
+		D493CA9D1D81ABB9002F4663 /* ADJAttribution.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 969952D01A01309200928462 /* ADJAttribution.h */; };
+		D493CA9E1D81ABBF002F4663 /* ADJEventFailure.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 9601CAE61C74BAAE00670879 /* ADJEventFailure.h */; };
+		D493CA9F1D81ABC4002F4663 /* ADJEventSuccess.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 9601CAE21C74B70600670879 /* ADJEventSuccess.h */; };
+		D493CAA01D81ABD0002F4663 /* ADJSessionSuccess.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 968173811C3C2D07002AE1DE /* ADJSessionSuccess.h */; };
+		D493CAA11D81ABD8002F4663 /* ADJSessionFailure.h in Copy Files */ = {isa = PBXBuildFile; fileRef = 968173851C3C2D36002AE1DE /* ADJSessionFailure.h */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -297,6 +306,15 @@
 			dstPath = "include/$(PRODUCT_NAME)";
 			dstSubfolderSpec = 16;
 			files = (
+				D493CAA11D81ABD8002F4663 /* ADJSessionFailure.h in Copy Files */,
+				D493CAA01D81ABD0002F4663 /* ADJSessionSuccess.h in Copy Files */,
+				D493CA9F1D81ABC4002F4663 /* ADJEventSuccess.h in Copy Files */,
+				D493CA9E1D81ABBF002F4663 /* ADJEventFailure.h in Copy Files */,
+				D493CA9D1D81ABB9002F4663 /* ADJAttribution.h in Copy Files */,
+				D493CA9C1D81ABB4002F4663 /* ADJLogger.h in Copy Files */,
+				D493CA9B1D81ABAF002F4663 /* ADJConfig.h in Copy Files */,
+				D493CA9A1D81ABA8002F4663 /* ADJEvent.h in Copy Files */,
+				D493CA991D81ABA1002F4663 /* Adjust.h in Copy Files */,
 			);
 			name = "Copy Files";
 			runOnlyForDeploymentPostprocessing = 0;
