@@ -60,6 +60,9 @@
 // assert not warn log
 #define anWarn(message) anLevel(message, ADJLogLevelWarn)
 
+// assert not error log
+#define anError(message) anLevel(message, ADJLogLevelError)
+
 // assert not assert log
 #define anAssert(message) anLevel(message, ADJLogLevelAssert)
 
@@ -87,6 +90,10 @@
 #define ailEquals(field, value, log) \
     XCTAssertEqual(field, value, @"f:%d, v:%d, l:%@", field, value, log)
 
+// assert equals long integer log
+#define alilEquals(field, value, log) \
+    XCTAssertEqual(field, value, @"f:%ld, v:%ld, l:%@", field, value, log)
+
 // assert equals log
 #define alEquals(field, value, log) \
     XCTAssertEqual(field, value, @"f:%@, v:%@, l:%@", field, value, log)
@@ -102,6 +109,14 @@
 // assert equals integer
 #define aiEquals(field, value) \
     ailEquals(field, value, self.loggerMock)
+
+// assert equals long integer
+#define aliEquals(field, value) \
+    alilEquals(field, value, self.loggerMock)
+
+// assert equals
+#define aEquals(field, value) \
+    alEquals(field, value, self.loggerMock)
 
 // assert not nill
 #define anNil(field) \

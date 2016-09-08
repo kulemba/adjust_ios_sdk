@@ -15,29 +15,30 @@ static NSString * const prefix = @"ActivityHandler ";
 @interface ADJActivityHandlerMock()
 
 @property (nonatomic, strong) ADJLoggerMock *loggerMock;
-@property (nonatomic, assign) BOOL updated;
+@property (nonatomic, retain) ADJResponseData * lastResponseData;
 
 @end
 
 @implementation ADJActivityHandlerMock
 
-- (id)initWithConfig:(ADJConfig *)adjustConfig {
+- (id)initWithConfig:(ADJConfig *)adjustConfig
+sessionParametersActionsArray:(NSArray*)sessionParametersActionsArray
+{
     self = [super init];
     if (self == nil) return nil;
 
     self.loggerMock = (ADJLoggerMock *) [ADJAdjustFactory logger];
-    self.updated = NO;
 
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"initWithConfig"]];
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"initWithConfig, %@", sessionParametersActionsArray]];
 
     return self;
 }
 
-- (void)trackSubsessionStart {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"trackSubsessionStart"]];
+- (void)applicationDidBecomeActive {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"applicationDidBecomeActive"]];
 }
-- (void)trackSubsessionEnd {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"trackSubsessionEnd"]];
+- (void)applicationWillResignActive {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"applicationWillResignActive"]];
 }
 
 - (void)trackEvent:(ADJEvent *)event {
@@ -45,8 +46,24 @@ static NSString * const prefix = @"ActivityHandler ";
 
 }
 
-- (void)finishedTracking:(NSDictionary *)jsonDict {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"finishedTracking, %@", jsonDict]];
+- (void)finishedTracking:(ADJResponseData *)responseData {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"finishedTracking, %@", responseData]];
+    self.lastResponseData = responseData;
+}
+
+- (void)launchEventResponseTasks:(ADJEventResponseData *)eventResponseData {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"launchEventResponseTasks, %@", eventResponseData]];
+    self.lastResponseData = eventResponseData;
+}
+
+- (void)launchSessionResponseTasks:(ADJSessionResponseData *)sessionResponseData {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"launchSessionResponseTasks, %@", sessionResponseData]];
+    self.lastResponseData = sessionResponseData;
+}
+
+- (void)launchAttributionResponseTasks:(ADJAttributionResponseData *)attributionResponseData {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"launchAttributionResponseTasks, %@", attributionResponseData]];
+    self.lastResponseData = attributionResponseData;
 }
 
 - (void)setEnabled:(BOOL)enabled {
@@ -79,26 +96,62 @@ static NSString * const prefix = @"ActivityHandler ";
     [self.loggerMock test:[prefix stringByAppendingFormat:@"setAskingAttribution, %d", askingAttribution]];
 }
 
-- (BOOL) updateAttribution:(ADJAttribution*) attribution {
+- (BOOL)updateAttributionI:(id<ADJActivityHandler>)selfI attribution:(ADJAttribution *)attribution {
     [self.loggerMock test:[prefix stringByAppendingFormat:@"updateAttribution, %@", attribution]];
     self.attributionUpdated = attribution;
-    return self.updated;
+    return NO;
 }
 
 - (void) setIadDate:(NSDate*)iAdImpressionDate withPurchaseDate:(NSDate*)appPurchaseDate {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"setIadDate"]];
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"setIadDate, iAdImpressionDate %@ appPurchaseDate, %@", iAdImpressionDate, appPurchaseDate]];
 }
 
-- (void) launchAttributionDelegate {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"launchAttributionDelegate"]];
+- (void)setIadDetails:(NSDictionary *)attributionDetails
+                error:(NSError *)error
+          retriesLeft:(int)retriesLeft {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"setIadDetails, %@ error, %@", attributionDetails, error]];
 }
 
 - (void) setOfflineMode:(BOOL)enabled {
     [self.loggerMock test:[prefix stringByAppendingFormat:@"setOfflineMode"]];
 }
 
-- (void) setUpdatedAttribution:(BOOL)updated {
-    self.updated = updated;
+- (ADJInternalState*) internalState {
+    return nil;
+}
+
+- (void)sendFirstPackages {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"sendFirstPackages"]];
+}
+
+- (void)addSessionCallbackParameter:(NSString *)key
+                              value:(NSString *)value {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"addSessionCallbackParameter, key %@ value, %@", key, value]];
+}
+
+- (void)addSessionPartnerParameter:(NSString *)key
+                             value:(NSString *)value {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"addSessionPartnerParameter, key %@ value, %@", key, value]];
+}
+
+- (void)removeSessionCallbackParameter:(NSString *)key {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"removeSessionCallbackParameter, %@", key]];
+}
+
+- (void)removeSessionPartnerParameter:(NSString *)key {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"removeSessionPartnerParameter, %@", key]];
+}
+
+- (void)resetSessionCallbackParameters {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"resetSessionCallbackParameters"]];
+}
+
+- (void)resetSessionPartnerParameters {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"resetSessionPartnerParameters"]];
+}
+
+- (void)teardown:(BOOL)deleteState {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"teardown"]];
 }
 
 @end

@@ -15,7 +15,7 @@ static NSString * const prefix = @"AttributionHandler ";
 @interface ADJAttributionHandlerMock()
 
 @property (nonatomic, strong) ADJLoggerMock *loggerMock;
-@property (nonatomic, assign) BOOL startPaused;
+@property (nonatomic, assign) BOOL startsSending;
 @property (nonatomic, assign) BOOL hasDelegate;
 
 @end
@@ -25,24 +25,28 @@ static NSString * const prefix = @"AttributionHandler ";
 
 - (id)initWithActivityHandler:(id<ADJActivityHandler>) activityHandler
        withAttributionPackage:(ADJActivityPackage *) attributionPackage
-                  startPaused:(BOOL)startPaused
-                  hasDelegate:(BOOL)hasDelegate
+                startsSending:(BOOL)startsSending
+hasAttributionChangedDelegate:(BOOL)hasDelegate
 {
     self = [super init];
     if (self == nil) return nil;
 
-    self.startPaused = startPaused;
+    self.startsSending = startsSending;
     self.hasDelegate = hasDelegate;
     self.loggerMock = (ADJLoggerMock *) [ADJAdjustFactory logger];
 
     self.attributionPackage = attributionPackage;
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"initWithActivityHandler"]];
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"initWithActivityHandler, startsSending: %d", startsSending]];
 
     return self;
 }
 
-- (void)checkAttribution:(NSDictionary *)jsonDict {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"checkAttribution, jsonDict: %@", jsonDict]];
+- (void)checkSessionResponse:(ADJSessionResponseData *)sessionResponseData {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"checkSessionResponse, responseData: %@", sessionResponseData]];
+}
+
+- (void)checkAttributionResponse:(ADJAttributionResponseData *)attributionResponseData {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"checkAttributionResponse, responseData: %@", attributionResponseData]];
 }
 
 - (void)getAttribution {
@@ -55,6 +59,10 @@ static NSString * const prefix = @"AttributionHandler ";
 
 - (void)resumeSending {
     [self.loggerMock test:[prefix stringByAppendingFormat:@"resumeSending"]];
+}
+
+- (void)teardown {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"teardown"]];
 }
 
 @end

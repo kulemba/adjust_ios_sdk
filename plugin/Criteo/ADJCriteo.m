@@ -162,6 +162,18 @@ static NSString * partnerIdInternal;
     [ADJCriteo injectOptionalParams:event];
 }
 
++ (void)injectDeeplinkIntoEvent:(ADJEvent *)event
+                            url:(NSURL *)url
+{
+    if (url == nil) {
+        return;
+    }
+
+    [event addPartnerParameter:@"criteo_deeplink" value:[url absoluteString]];
+
+    [ADJCriteo injectOptionalParams:event];
+}
+
 + (void)injectHashedEmailIntoCriteoEvents:(NSString *)hashEmail
 {
     hashEmailInternal = hashEmail;
@@ -242,7 +254,7 @@ static NSString * partnerIdInternal;
         [criteoVBValue appendString:@","];
     }
     [criteoVBValue appendString:@"]"];
-    return [criteoVBValue stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    return [criteoVBValue stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
 }
 
 + (NSString*) createCriteoVLFromProducts:(NSArray*) productIds
@@ -285,7 +297,7 @@ static NSString * partnerIdInternal;
     }
 
     [criteoVLValue appendString:@"]"];
-    return [criteoVLValue stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+    return [criteoVLValue stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
 }
 
 @end

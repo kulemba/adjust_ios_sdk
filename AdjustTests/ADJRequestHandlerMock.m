@@ -15,7 +15,7 @@ static NSString * const prefix = @"RequestHandler ";
 @interface ADJRequestHandlerMock()
 
 @property (nonatomic, assign) id<ADJPackageHandler> packageHandler;
-@property (nonatomic, assign) ADJLoggerMock *loggerMock;
+@property (nonatomic, strong) ADJLoggerMock *loggerMock;
 
 @end
 
@@ -35,8 +35,11 @@ static NSString * const prefix = @"RequestHandler ";
     return self;
 }
 
-- (void)sendPackage:(ADJActivityPackage *)activityPackage {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"sendPackage, %@", activityPackage]];
+- (void)sendPackage:(ADJActivityPackage *)activityPackage
+          queueSize:(NSUInteger)queueSize
+{
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"sendPackage, activityPackage %@", activityPackage]];
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"sendPackage, queueSize %lu", queueSize]];
 
     /*
     NSDictionary *jsonDict;
@@ -55,6 +58,10 @@ static NSString * const prefix = @"RequestHandler ";
         [self.packageHandler sendNextPackage];
     }
      */
+}
+
+- (void)teardown {
+    [self.loggerMock test:[prefix stringByAppendingString:@"teardown"]];
 }
 
 @end

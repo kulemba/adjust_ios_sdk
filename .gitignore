@@ -24,3 +24,9 @@ Pods
 
 # git files
 *.orig
+
+# Adjust
+Frameworks
+
+# Code style
+uncrustify.cfg

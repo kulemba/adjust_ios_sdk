@@ -17,34 +17,37 @@ static NSString * const prefix = @"PackageHandler ";
 
 @property (nonatomic, strong) ADJLoggerMock *loggerMock;
 @property (nonatomic, assign) id<ADJActivityHandler> activityHandler;
-@property (nonatomic, assign) BOOL startPaused;
+@property (nonatomic, assign) BOOL startsSending;
 
 @end
 
 @implementation ADJPackageHandlerMock
 
 - (id)init {
-    return [self initWithActivityHandler:nil startPaused:NO];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wobjc-designated-initializers"
+    return [self initWithActivityHandler:nil startsSending:YES];
+#pragma clang diagnostic pop
 }
 - (id)initWithActivityHandler:(id<ADJActivityHandler>)activityHandler
-                  startPaused:(BOOL)startPaused
+                startsSending:(BOOL)startsSending
 {
     self = [super init];
     if (self == nil) return nil;
 
-    self.startPaused = startPaused;
+    self.startsSending = startsSending;
     self.activityHandler = activityHandler;
 
     self.loggerMock = (ADJLoggerMock *) ADJAdjustFactory.logger;
     self.packageQueue = [NSMutableArray array];
 
-    [self.loggerMock test:[NSString stringWithFormat:@"%@initWithActivityHandler, paused: %d", prefix, startPaused]];
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"initWithActivityHandler, startsSending: %d", startsSending]];
 
     return self;
 }
 
 - (void)addPackage:(ADJActivityPackage *)package {
-    [self.loggerMock test:[prefix stringByAppendingString:@"addPackage"]];
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"addPackage %d", package.activityKind]];
     [self.packageQueue addObject:package];
 }
 
@@ -52,11 +55,13 @@ static NSString * const prefix = @"PackageHandler ";
     [self.loggerMock test:[prefix stringByAppendingString:@"sendFirstPackage"]];
 }
 
-- (void)sendNextPackage {
+- (void)sendNextPackage:(ADJResponseData *)responseData {
     [self.loggerMock test:[prefix stringByAppendingString:@"sendNextPackage"]];
 }
 
-- (void)closeFirstPackage {
+- (void)closeFirstPackage:(ADJResponseData *)responseData
+          activityPackage:(ADJActivityPackage *)activityPackage
+{
     [self.loggerMock test:[prefix stringByAppendingString:@"closeFirstPackage"]];
 }
 
@@ -68,9 +73,13 @@ static NSString * const prefix = @"PackageHandler ";
     [self.loggerMock test:[prefix stringByAppendingString:@"resumeSending"]];
 }
 
-- (void)finishedTracking:(NSDictionary *)jsonDict {
-    [self.loggerMock test:[prefix stringByAppendingFormat:@"finishedTracking, %@", jsonDict.descriptionInStringsFileFormat]];
-    self.jsonDict = jsonDict;
+- (void)updatePackages:(ADJSessionParameters *)sessionParameters {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"updatePackages, sessionParameters: %@", sessionParameters]];
+
+}
+
+- (void)teardown:(BOOL)deleteState {
+    [self.loggerMock test:[prefix stringByAppendingFormat:@"teardown, deleteState: %d", deleteState]];
 }
 
 @end

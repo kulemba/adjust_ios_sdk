@@ -17,13 +17,21 @@
 #import "ADJLogger.h"
 #import "ADJAttributionHandlerMock.h"
 #import "ADJConfig.h"
-#import "ADJDelegateTest.h"
+#import "ADJAttributionChangedDelegate.h"
 #import "ADJTestActivityPackage.h"
+#import "ADJTrackingDelegate.h"
+#import "ADJSdkClickHandlerMock.h"
+#import "ADJSessionState.h"
+#import "ADJDeeplinkDelegate.h"
+#import "ADJActivityHandlerConstructorState.h"
+#import "ADJEndSessionState.h"
+#import "ADJInitState.h"
 
 @interface ADJActivityHandlerTests : ADJTestActivityPackage
 
 @property (atomic,strong) ADJPackageHandlerMock *packageHandlerMock;
 @property (atomic,strong) ADJAttributionHandlerMock *attributionHandlerMock;
+@property (atomic,strong) ADJSdkClickHandlerMock * sdkClickHandlerMock;
 
 @end
 
@@ -40,7 +48,9 @@
 
 - (void)tearDown
 {
+    [ADJAdjustFactory setTesting:NO];
     [ADJAdjustFactory setPackageHandler:nil];
+    [ADJAdjustFactory setSdkClickHandler:nil];
     [ADJAdjustFactory setLogger:nil];
     [ADJAdjustFactory setSessionInterval:-1];
     [ADJAdjustFactory setSubsessionInterval:-1];
@@ -52,11 +62,15 @@
 }
 
 - (void)reset {
+    [ADJAdjustFactory setTesting:YES];
+
     self.loggerMock = [[ADJLoggerMock alloc] init];
     [ADJAdjustFactory setLogger:self.loggerMock];
 
     self.packageHandlerMock = [ADJPackageHandlerMock alloc];
     [ADJAdjustFactory setPackageHandler:self.packageHandlerMock];
+    self.sdkClickHandlerMock = [ADJSdkClickHandlerMock alloc];
+    [ADJAdjustFactory setSdkClickHandler:self.sdkClickHandlerMock];
 
     [ADJAdjustFactory setSessionInterval:-1];
     [ADJAdjustFactory setSubsessionInterval:-1];
@@ -69,6 +83,9 @@
     // starting from a clean slate
     XCTAssert([ADJTestsUtil deleteFile:@"AdjustIoActivityState" logger:self.loggerMock], @"%@", self.loggerMock);
     XCTAssert([ADJTestsUtil deleteFile:@"AdjustIoAttribution" logger:self.loggerMock], @"%@", self.loggerMock);
+    XCTAssert([ADJTestsUtil deleteFile:@"AdjustSessionParameters" logger:self.loggerMock], @"%@", self.loggerMock);
+    XCTAssert([ADJTestsUtil deleteFile:@"AdjustSessionCallbackParameters" logger:self.loggerMock], @"%@", self.loggerMock);
+    XCTAssert([ADJTestsUtil deleteFile:@"AdjustSessionPartnerParameters" logger:self.loggerMock], @"%@", self.loggerMock);
 }
 
 - (void)testFirstSession
@@ -77,29 +94,10 @@
     [self reset];
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    ADJConfig * config = [self getConfig];
 
     //  create handler and start the first session
-    [ADJActivityHandler handlerWithConfig:config];
-
-    // it's necessary to sleep the activity for a while after each handler call
-    //  to let the internal queue act
-    [NSThread sleepForTimeInterval:2.0];
-
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3"];
-
-    // check mac mad5 is enabled
-    anInfo(@"Tracking of macMd5 is disabled");
-
-    // check event buffering is disabled
-    anInfo(@"Event buffering is enabled");
-
-    // check does not have default tracker
-    anInfo(@"Default tracker:");
-
-    // test first session start
-    [self checkFirstSession];
+    [self startAndCheckFirstSession:config];
 
     // checking the default values of the first session package
     //  should only have one package
@@ -120,39 +118,28 @@
     [self reset];
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    ADJConfig * config = [self getConfig];
 
     // buffer events
     config.eventBufferingEnabled = YES;
 
-    // set verbose log level
-    config.logLevel = ADJLogLevelVerbose;
-
     // set default tracker
     [config setDefaultTracker:@"default1234tracker"];
 
-    // set macMd5 disabled
-    [config setMacMd5TrackingEnabled:NO];
-
     //  create handler and start the first session
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
 
     [NSThread sleepForTimeInterval:2.0];
 
     // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"1"];
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.eventBufferingIsEnabled = YES;
+    initState.defaultTracker = @"default1234tracker";
 
-    // check mac mad5 is disabled
-    aInfo(@"Tracking of macMd5 is disabled");
+    ADJSessionState * sessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    sessionState.eventBufferingIsEnabled = YES;
 
-    // check event buffering is enabled
-    aInfo(@"Event buffering is enabled");
-
-    // check does have default tracker
-    aInfo(@"Default tracker: default1234tracker");
-
-    // test first session start
-    [self checkFirstSession];
+    [self checkInitAndStart:initState sessionState:sessionState];
 
     // create the first Event object with callback and partner parameters
     ADJEvent * firstEvent = [ADJEvent eventWithEventToken:@"event1"];
@@ -192,6 +179,9 @@
 
     // and not sent to package handler
     anTest(@"PackageHandler sendFirstPackage");
+
+    // does not fire background timer
+    anVerbose(@"Background timer starting");
 
     // after tracking the event it should write the activity state
     aDebug(@"Wrote Activity state: ec:1");
@@ -235,15 +225,14 @@
     // and not sent to package handler
     anTest(@"PackageHandler sendFirstPackage");
 
+    // does not fire background timer
+    anVerbose(@"Background timer starting");
+
     // after tracking the event it should write the activity state
     aDebug(@"Wrote Activity state: ec:2");
 
     // create a forth Event object without revenue
     ADJEvent * forthEvent = [ADJEvent eventWithEventToken:@"event4"];
-
-    // test push token
-    const char bytes[] = "\xFC\x07\x21\xB6\xDF\xAD\x5E\xE1\x10\x97\x5B\xB2\xA2\x63\xDE\x00\x61\xCC\x70\x5B\x4A\x85\xA8\xAE\x3C\xCF\xBE\x7A\x66\x2F\xB1\xAB";
-    [activityHandler setDeviceToken:[NSData dataWithBytes:bytes length:(sizeof(bytes) - 1)]];
 
     // track the forth event
     [activityHandler trackEvent:forthEvent];
@@ -259,6 +248,9 @@
     // and not sent to package handler
     anTest(@"PackageHandler sendFirstPackage");
 
+    // does not fire background timer
+    anVerbose(@"Background timer starting");
+
     // after tracking the event it should write the activity state
     aDebug(@"Wrote Activity state: ec:3");
 
@@ -273,6 +265,7 @@
     ADJPackageFields * firstSessionPackageFields = [ADJPackageFields fields];
 
     firstSessionPackageFields.defaultTracker = @"default1234tracker";
+    firstSessionPackageFields.eventBufferingEnabled = 1;
 
     // test first session
     [self testPackageSession:sessionPackage fields:firstSessionPackageFields sessionCount:@"1"];
@@ -290,9 +283,10 @@
     firstPackageFields.callbackParameters = @"{\"keyCall\":\"valueCall2\",\"fooCall\":\"barCall\"}";
     firstPackageFields.partnerParameters = @"{\"keyPartner\":\"valuePartner2\",\"fooPartner\":\"barPartner\"}";
     firstPackageFields.suffix = @"(0.00100 EUR, 'event1')";
+    firstPackageFields.eventBufferingEnabled = 1;
 
     // test first event
-    [self testEventSession:firstEventPackage fields:firstPackageFields eventToken:@"event1"];
+    [self testEventPackage:firstEventPackage fields:firstPackageFields eventToken:@"event1"];
 
     // third event
     ADJActivityPackage * thirdEventPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[2];
@@ -306,9 +300,10 @@
     thirdPackageFields.currency = @"USD";
     thirdPackageFields.suffix = @"(0.00000 USD, 'event3')";
     thirdPackageFields.receipt = @"eyAidHJhbnNhY3Rpb24taWQiID0gInRfaWRfMiI7IH0";
+    thirdPackageFields.eventBufferingEnabled = 1;
 
     // test third event
-    [self testEventSession:thirdEventPackage fields:thirdPackageFields eventToken:@"event3"];
+    [self testEventPackage:thirdEventPackage fields:thirdPackageFields eventToken:@"event3"];
 
     // fourth event
     ADJActivityPackage * fourthEventPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[3];
@@ -319,10 +314,84 @@
     // set event test parameters
     fourthPackageFields.eventCount = @"3";
     fourthPackageFields.suffix = @"'event4'";
-    fourthPackageFields.pushToken = @"fc0721b6dfad5ee110975bb2a263de0061cc705b4a85a8ae3ccfbe7a662fb1ab";
+    fourthPackageFields.eventBufferingEnabled = 1;
 
     // test fourth event
-    [self testEventSession:fourthEventPackage fields:fourthPackageFields eventToken:@"event4"];
+    [self testEventPackage:fourthEventPackage fields:fourthPackageFields eventToken:@"event4"];
+}
+
+- (void)testEventsNotBuffered
+{
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
+
+    // create the first Event
+    ADJEvent * firstEvent = [ADJEvent eventWithEventToken:@"event1"];
+
+    // track event
+    [activityHandler trackEvent:firstEvent];
+
+    [NSThread sleepForTimeInterval:2];
+
+    // check that event package was added
+    aTest(@"PackageHandler addPackage");
+
+    // check that event was sent to package handler
+    aTest(@"PackageHandler sendFirstPackage");
+
+    // and not buffered
+    anInfo(@"Buffered event");
+
+    // does not fire background timer
+    anVerbose(@"Background timer starting");
+
+    // after tracking the event it should write the activity state
+    aDebug(@"Wrote Activity state");
+}
+
+- (void)testEventBeforeStart {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    // create the first Event
+    ADJEvent * firstEvent = [ADJEvent eventWithEventToken:@"event1"];
+
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    // track event
+    [activityHandler trackEvent:firstEvent];
+
+    [NSThread sleepForTimeInterval:2];
+
+    // test session
+    ADJSessionState * sessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    // does not start until it goes to foreground
+    sessionState.foregroundTimerStarts = NO;
+    sessionState.toSend = NO;
+    sessionState.startSubSession = NO;
+
+    // XXX
+    // test init values
+    [self checkInitAndStartTestsWithHandler:activityHandler];
+
+    // check that event package was added
+    aTest(@"PackageHandler addPackage");
+
+    // check that event was sent to package handler
+    aTest(@"PackageHandler sendFirstPackage");
+
+    // after tracking the event it should write the activity state
+    aDebug(@"Wrote Activity state: ec:1 sc:1 ssc:1");
 }
 
 - (void)testChecks
@@ -355,13 +424,15 @@
     aFalse(wrongEnvironmentConfig.isValid);
 
     // activity handler created with a nil config
-    id<ADJActivityHandler> nilConfigActivityHandler = [ADJActivityHandler handlerWithConfig:nil];
+    id<ADJActivityHandler> nilConfigActivityHandler = [ADJActivityHandler handlerWithConfig:nil
+                                                              sessionParametersActionsArray:nil];
 
     aError(@"AdjustConfig missing");
     aNil(nilConfigActivityHandler);
 
     // activity handler created with an invalid config
-    id<ADJActivityHandler> invalidConfigActivityHandler = [ADJActivityHandler handlerWithConfig:nilAppTokenConfig];
+    id<ADJActivityHandler> invalidConfigActivityHandler = [ADJActivityHandler handlerWithConfig:nilAppTokenConfig
+                                                                  sessionParametersActionsArray:nil];
 
     aError(@"AdjustConfig not initialized correctly");
     aNil(invalidConfigActivityHandler);
@@ -379,27 +450,16 @@
     aFalse(malformedTokenEvent.isValid);
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
-
-    // set the log level
-    config.logLevel = ADJLogLevelDebug;
+    ADJConfig * config = [self getConfig];
 
     //  set the delegate that doesn't implement the optional selector
     ADJTestsUtil * delegateNotImpl = [[ADJTestsUtil alloc] init];
     [config setDelegate:delegateNotImpl];
 
-    aError(@"Delegate does not implement AdjustDelegate");
+    aError(@"Delegate does not implement any optional method");
 
     //  create handler and start the first session
-    id<ADJActivityHandler> activityHandler =[ADJActivityHandler handlerWithConfig:config];
-
-    [NSThread sleepForTimeInterval:2];
-
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"2"];
-
-    // test first session start
-    [self checkFirstSession];
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
 
     // track null event
     [activityHandler trackEvent:nil];
@@ -503,8 +563,6 @@
     // create activity package test
     ADJPackageFields * sessionPackageFields = [ADJPackageFields fields];
 
-    sessionPackageFields.hasDelegate = @"0";
-
     // test first session
     [self testPackageSession:sessionPackage fields:sessionPackageFields sessionCount:@"1"];
 
@@ -519,10 +577,63 @@
     eventFields.suffix = @"'event1'";
 
     // test first event
-    [self testEventSession:eventPackage fields:eventFields eventToken:@"event1"];
+    [self testEventPackage:eventPackage fields:eventFields eventToken:@"event1"];
+
+    [activityHandler resetSessionCallbackParameters];
+    [activityHandler resetSessionPartnerParameters];
+
+    [activityHandler removeSessionCallbackParameter:nil];
+    [activityHandler removeSessionCallbackParameter:@""];
+    [activityHandler removeSessionCallbackParameter:@"nonExistent"];
+
+    [activityHandler removeSessionPartnerParameter:nil];
+    [activityHandler removeSessionPartnerParameter:@""];
+    [activityHandler removeSessionPartnerParameter:@"nonExistent"];
+
+    [activityHandler addSessionCallbackParameter:nil value:@"value"];
+    [activityHandler addSessionCallbackParameter:@"" value:@"value"];
+
+    [activityHandler addSessionCallbackParameter:@"key" value:nil];
+    [activityHandler addSessionCallbackParameter:@"key" value:@""];
+
+    [activityHandler addSessionPartnerParameter:nil value:@"value"];
+    [activityHandler addSessionPartnerParameter:@"" value:@"value"];
+
+    [activityHandler addSessionPartnerParameter:@"key" value:nil];
+    [activityHandler addSessionPartnerParameter:@"key" value:@""];
+
+    [activityHandler removeSessionCallbackParameter:@"nonExistent"];
+    [activityHandler removeSessionPartnerParameter:@"nonExistent"];
+
+    [NSThread sleepForTimeInterval:2];
+
+    aWarn(@"Session Callback parameters are not set");
+    aWarn(@"Session Partner parameters are not set");
+
+    aError(@"Session Callback parameter key is missing");
+    aError(@"Session Callback parameter key is empty");
+    aWarn(@"Session Callback parameters are not set");
+
+    aError(@"Session Partner parameter key is missing");
+    aError(@"Session Partner parameter key is empty");
+    aWarn(@"Session Partner parameters are not set");
+
+    aError(@"Session Callback parameter key is missing");
+    aError(@"Session Callback parameter key is empty");
+    aError(@"Session Callback parameter value is missing");
+    aError(@"Session Callback parameter value is empty");
+
+    aError(@"Session Partner parameter key is missing");
+    aError(@"Session Partner parameter key is empty");
+    aError(@"Session Partner parameter value is missing");
+    aError(@"Session Partner parameter value is empty");
+
+    aWarn(@"Session Callback parameters are not set");
+    aWarn(@"Session Partner parameters are not set");
 }
 
-- (void)testSessons
+
+- (void)testSessions
 {
     //  reseting to make the test order independent
     [self reset];
@@ -532,76 +643,94 @@
     [ADJAdjustFactory setSubsessionInterval:(1)]; // 1 second
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
-
-    // set verbose log level
-    config.logLevel = ADJLogLevelInfo;
+    ADJConfig * config = [self getConfig];
 
     //  create handler and start the first session
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
 
-    [NSThread sleepForTimeInterval:2];
+    [self stopActivity:activityHandler];
 
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3"];
+    [NSThread sleepForTimeInterval:1];
 
-    // test first session start
-    [self checkFirstSession];
+    // test the end of the subsession
+    [self checkEndSession];
 
-    // trigger a new sub session session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
 
-    // and end it
-    [activityHandler trackSubsessionEnd];
+    ADJInternalState * internalState = [activityHandler internalState];
+
+    // comes to the foreground
+    aTrue([internalState isForeground]);
+
+    [NSThread sleepForTimeInterval:1];
+
+    // test the new sub session
+    ADJSessionState * secondSubsession = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    secondSubsession.subsessionCount = 2;
+    secondSubsession.toSend = YES;
+    [self checkStartInternal:secondSubsession];
+
+    [self stopActivity:activityHandler];
 
     [NSThread sleepForTimeInterval:5];
 
-    [self checkSubsession:1 subSessionCount:2 timerAlreadyStarted:YES];
-
+    // test the end of the subsession
     [self checkEndSession];
 
     // trigger a new session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
 
     [NSThread sleepForTimeInterval:1];
 
     // new session
-    [self checkNewSession:NO
-             sessionCount:2
-               eventCount:0
-     timerAlreadyStarted:YES];
+    ADJSessionState * secondSession = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    secondSession.sessionCount = 2;
+    secondSession.timerAlreadyStarted = YES;
+    secondSession.toSend = YES;
+    [self checkStartInternal:secondSession];
 
-    // end the session
-    [activityHandler trackSubsessionEnd];
+    // stop and start the activity with little interval
+    // so it won't trigger a sub session
+    [self stopActivity:activityHandler];
+    [activityHandler applicationDidBecomeActive];
 
     [NSThread sleepForTimeInterval:1];
 
-    [self checkEndSession];
+    // test the end of the subsession
+    ADJEndSessionState * endState = [[ADJEndSessionState alloc] init];
+    endState.pausing = NO;
+
+    [self checkEndSession:endState];
+
+    // test non sub session
+    ADJSessionState * nonSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeNonSession];
+    nonSessionState.toSend = YES;
+    [self checkStartInternal:nonSessionState];
 
     // 2 session packages
     aiEquals(2, (int)[self.packageHandlerMock.packageQueue count]);
 
-    // first session
-    ADJActivityPackage *firstSessionPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[0];
+    ADJActivityPackage * firstSessionActivityPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[0];
 
     // create activity package test
-    ADJPackageFields * firstSessionfields = [ADJPackageFields fields];
+    ADJPackageFields * firstSessionPackageFields = [ADJPackageFields fields];
 
     // test first session
-    [self testPackageSession:firstSessionPackage fields:firstSessionfields sessionCount:@"1"];
+    [self testPackageSession:firstSessionActivityPackage fields:firstSessionPackageFields sessionCount:@"1"];
 
     // get second session package
-    ADJActivityPackage *secondSessionPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
+    ADJActivityPackage * secondSessionActivityPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
 
     // create second session test package
-    ADJPackageFields * secondSessionfields = [ADJPackageFields fields];
+    ADJPackageFields * secondSessionPackageFields = [ADJPackageFields fields];
 
     // check if it saved the second subsession in the new package
-    secondSessionfields.subSessionCount = @"2";
-
+    secondSessionPackageFields.subSessionCount = @"2";
+    
     // test second session
-    [self testPackageSession:secondSessionPackage fields:secondSessionfields sessionCount:@"2"];
+    [self testPackageSession:secondSessionActivityPackage fields:secondSessionPackageFields sessionCount:@"2"];
 }
+
 
 - (void)testDisable
 {
@@ -617,15 +746,13 @@
     [ADJAdjustFactory setSubsessionInterval:(1)]; // 1 second
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
-
-    // set log level
-    config.logLevel = ADJLogLevelWarn;
+    ADJConfig * config = [self getConfig];
 
     // start activity handler with config
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
 
-    // check that is true by default
+    // check that it is enabled
     aTrue([activityHandler isEnabled]);
 
     // disable sdk
@@ -634,42 +761,38 @@
     // check that it is disabled
     aFalse([activityHandler isEnabled]);
 
-    // not writing activity state because it did not had time to start
+    // not writing activity state because it set enable does not start the sdk
     anDebug(@"Wrote Activity state");
 
     // check if message the disable of the SDK
-    aInfo(@"Pausing package handler and attribution handler to disable the SDK");
+    aInfo(@"Handlers will start as paused due to the SDK being disabled");
 
-    // it's necessary to sleep the activity for a while after each handler call
-    // to let the internal queue act
-    [NSThread sleepForTimeInterval:2];
+    [NSThread sleepForTimeInterval:4.0];
 
     // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"4"];
+    [self checkInitAndStartTestsWithHandler:activityHandler];
 
-    // test first session start without attribution handler
-    [self checkFirstSession:YES];
-
-    // test end session of disable
-    [self checkEndSession];
+    // disable runs after start
+    [self checkHandlerStatus:YES];
 
     // try to do activities while SDK disabled
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [activityHandler trackEvent:[ADJEvent eventWithEventToken:@"event1"]];
 
     [NSThread sleepForTimeInterval:3];
 
-    // check that timer was not executed
-    anDebug(@"Session timer fired");
+    aVerbose(@"Subsession start");
 
-    // check that it did not resume
-    anTest(@"PackageHandler resumeSending");
+    [self checkStartDisable];
 
-    // check that it did not wrote activity state from new session or subsession
-    anDebug(@"Wrote Activity state");
+    [self stopActivity:activityHandler];
 
-    // check that it did not add any event package
-    anTest(@"PackageHandler addPackage");
+    [NSThread sleepForTimeInterval:1.0];
+
+    ADJEndSessionState * endState = [[ADJEndSessionState alloc] init];
+    endState.updateActivityState = NO;
+    // test end session of disable
+    [self checkEndSession:endState];
 
     // only the first session package should be sent
     aiEquals(1, (int)[self.packageHandlerMock.packageQueue count]);
@@ -678,13 +801,14 @@
     [activityHandler setOfflineMode:YES];
 
     // pausing due to offline mode
-    aInfo(@"Pausing package and attribution handler to put in offline mode");
+    aInfo(@"Pausing handlers to put SDK offline mode");
 
     // wait to update status
-    [NSThread sleepForTimeInterval:6.0];
+    [NSThread sleepForTimeInterval:5.0];
 
-    // test end session of offline
-    [self checkEndSession];
+    // after pausing, even when it's already paused
+    // tries to update the status
+    [self checkHandlerStatus:YES];
 
     // re-enable the SDK
     [activityHandler setEnabled:YES];
@@ -693,26 +817,42 @@
     aTrue([activityHandler isEnabled]);
 
     // check message of SDK still paused
-    aInfo(@"Package and attribution handler remain paused due to the SDK is offline");
+    aInfo(@"Handlers remain paused");
 
-    [activityHandler trackSubsessionStart];
     [NSThread sleepForTimeInterval:1.0];
 
-    [self checkNewSession:YES sessionCount:2 eventCount:0 timerAlreadyStarted:NO];
+    // even though it will remained paused,
+    // it will update the status to paused
+    [self checkHandlerStatus:YES];
 
-    // and that the timer is not fired
-    anDebug(@"Session timer fired");
-    
+    // start the sdk
+    // foreground timer does not start because it's offline
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    ADJSessionState * secondPausedSession = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+
+    secondPausedSession.toSend = NO;
+    secondPausedSession.sessionCount = 2;
+    secondPausedSession.foregroundTimerStarts = NO;
+    secondPausedSession.foregroundTimerAlreadyStarted = NO;
+
+    [self checkStartInternal:secondPausedSession];
+
     // track an event
     [activityHandler trackEvent:[ADJEvent eventWithEventToken:@"event1"]];
 
-    [NSThread sleepForTimeInterval:1.0];
+    [NSThread sleepForTimeInterval:5.0];
 
     // check that it did add the event package
     aTest(@"PackageHandler addPackage");
 
     // and send it
     aTest(@"PackageHandler sendFirstPackage");
+
+    // does not fire background timer
+    anVerbose(@"Background timer starting");
 
     // it should have the second session and the event
     aiEquals(3, (int)[self.packageHandlerMock.packageQueue count]);
@@ -735,27 +875,39 @@
     eventFields.suffix = @"'event1'";
 
     // test event
-    [self testEventSession:eventPackage fields:eventFields eventToken:@"event1"];
+    [self testEventPackage:eventPackage fields:eventFields eventToken:@"event1"];
+
+    // end the session
+    [self stopActivity:activityHandler];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    [self checkEndSession];
 
     // put in online mode
     [activityHandler setOfflineMode:NO];
 
     // message that is finally resuming
-    aInfo(@"Resuming package handler and attribution handler to put in online mode");
+    aInfo(@"Resuming handlers to put SDK in online mode");
 
-    [NSThread sleepForTimeInterval:6.0];
+    [NSThread sleepForTimeInterval:1.0];
 
-    // check status update
-    aTest(@"AttributionHandler resumeSending");
-    aTest(@"PackageHandler resumeSending");
+    // after un-pausing the sdk, tries to update the handlers
+    // it is still paused because it's on the background
+    [self checkHandlerStatus:YES];
 
-    // track sub session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
 
     [NSThread sleepForTimeInterval:1.0];
 
     // test sub session not paused
-    [self checkNewSession:NO sessionCount:3 eventCount:1 timerAlreadyStarted:YES];
+    ADJSessionState * thirdSessionStarting = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    thirdSessionStarting.sessionCount = 3;
+    thirdSessionStarting.eventCount = 1;
+    thirdSessionStarting.timerAlreadyStarted = NO;
+    thirdSessionStarting.toSend = YES;
+
+    [self checkStartInternal:thirdSessionStarting];
 }
 
 - (void)testAppWillOpenUrl
@@ -764,30 +916,20 @@
     [self reset];
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
-
-    // set log level
-    config.logLevel = ADJLogLevelError;
+    ADJConfig * config = [self getConfig];
 
     // start activity handler with config
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
-
-    // it's necessary to sleep the activity for a while after each handler call
-    //  to let the internal queue act
-    [NSThread sleepForTimeInterval:2.0];
-
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"5"];
-
-    // test first session start
-    [self checkFirstSession];
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
 
     NSURL* attributions = [NSURL URLWithString:@"AdjustTests://example.com/path/inApp?adjust_tracker=trackerValue&other=stuff&adjust_campaign=campaignValue&adjust_adgroup=adgroupValue&adjust_creative=creativeValue"];
     NSURL* extraParams = [NSURL URLWithString:@"AdjustTests://example.com/path/inApp?adjust_foo=bar&other=stuff&adjust_key=value"];
     NSURL* mixed = [NSURL URLWithString:@"AdjustTests://example.com/path/inApp?adjust_foo=bar&other=stuff&adjust_campaign=campaignValue&adjust_adgroup=adgroupValue&adjust_creative=creativeValue"];
     NSURL* emptyQueryString = [NSURL URLWithString:@"AdjustTests://"];
     NSURL* emptyString = [NSURL URLWithString:@""];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnonnull"
     NSURL* nilString = [NSURL URLWithString:nil];
+#pragma clang diagnostic pop
     NSURL* nilUrl = nil;
     NSURL* single = [NSURL URLWithString:@"AdjustTests://example.com/path/inApp?adjust_foo"];
     NSURL* prefix = [NSURL URLWithString:@"AdjustTests://example.com/path/inApp?adjust_=bar"];
@@ -804,19 +946,20 @@
     [activityHandler appWillOpenUrl:prefix];
     [activityHandler appWillOpenUrl:incomplete];
 
-    [NSThread sleepForTimeInterval:2];
+    [NSThread sleepForTimeInterval:1];
 
     // three click packages: attributions, extraParams and mixed
-    for (int i = 3; i > 0; i--) {
-        aTest(@"PackageHandler addPackage");
+    for (int i = 7; i > 0; i--) {
+        aTest(@"SdkClickHandler sendSdkClick");
     }
 
-    // checking the default values of the first session package
-    // 1 session + 3 click
-    aiEquals(4, (int)[self.packageHandlerMock.packageQueue count]);
+    anTest(@"SdkClickHandler sendSdkClick");
+
+    // 7 clicks
+    aiEquals(7, (int)[self.sdkClickHandlerMock.packageQueue count]);
 
     // get the click package
-    ADJActivityPackage * attributionClickPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
+    ADJActivityPackage * attributionClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[0];
 
     // create activity package test
     ADJPackageFields * attributionClickFields = [ADJPackageFields fields];
@@ -831,11 +974,13 @@
     // and set it
     attributionClickFields.attribution = firstAttribution;
 
+    attributionClickFields.deepLink = @"AdjustTests://example.com/path/inApp?adjust_tracker=trackerValue&other=stuff&adjust_campaign=campaignValue&adjust_adgroup=adgroupValue&adjust_creative=creativeValue";
+
     // test the first deeplink
     [self testClickPackage:attributionClickPackage fields:attributionClickFields source:@"deeplink"];
 
     // get the click package
-    ADJActivityPackage * extraParamsClickPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[2];
+    ADJActivityPackage * extraParamsClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[1];
 
     // create activity package test
     ADJPackageFields * extraParamsClickFields = [ADJPackageFields fields];
@@ -843,11 +988,13 @@
     // other deep link parameters
     extraParamsClickFields.deepLinkParameters = @"{\"key\":\"value\",\"foo\":\"bar\"}";
 
+    extraParamsClickFields.deepLink = @"AdjustTests://example.com/path/inApp?adjust_foo=bar&other=stuff&adjust_key=value";
+
     // test the second deeplink
     [self testClickPackage:extraParamsClickPackage fields:extraParamsClickFields source:@"deeplink"];
 
     // get the click package
-    ADJActivityPackage * mixedClickPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[3];
+    ADJActivityPackage * mixedClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[2];
 
     // create activity package test
     ADJPackageFields * mixedClickFields = [ADJPackageFields fields];
@@ -861,45 +1008,88 @@
     // and set it
     mixedClickFields.attribution = secondAttribution;
 
+    mixedClickFields.deepLink = @"AdjustTests://example.com/path/inApp?adjust_foo=bar&other=stuff&adjust_campaign=campaignValue&adjust_adgroup=adgroupValue&adjust_creative=creativeValue";
+
     // other deep link parameters
     mixedClickFields.deepLinkParameters = @"{\"foo\":\"bar\"}";
 
     // test the third deeplink
     [self testClickPackage:mixedClickPackage fields:mixedClickFields source:@"deeplink"];
+
+    // get the click package
+    ADJActivityPackage * emptyQueryStringClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[3];
+
+    // create activity package test
+    ADJPackageFields * emptyQueryStringClickFields = [ADJPackageFields fields];
+
+    emptyQueryStringClickFields.deepLink = @"AdjustTests://";
+
+    // test the second deeplink
+    [self testClickPackage:emptyQueryStringClickPackage fields:emptyQueryStringClickFields source:@"deeplink"];
+    
+    // get the click package
+    ADJActivityPackage * singleClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[4];
+
+    // create activity package test
+    ADJPackageFields * singleClickFields = [ADJPackageFields fields];
+
+    singleClickFields.deepLink = @"AdjustTests://example.com/path/inApp?adjust_foo";
+
+    // test the second deeplink
+    [self testClickPackage:singleClickPackage fields:singleClickFields source:@"deeplink"];
+
+    // get the click package
+    ADJActivityPackage * prefixClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[5];
+
+    // create activity package test
+    ADJPackageFields * prefixClickFields = [ADJPackageFields fields];
+
+    prefixClickFields.deepLink = @"AdjustTests://example.com/path/inApp?adjust_=bar";
+
+    // test the second deeplink
+    [self testClickPackage:prefixClickPackage fields:prefixClickFields source:@"deeplink"];
+
+    // get the click package
+    ADJActivityPackage * incompleteClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[6];
+
+    // create activity package test
+    ADJPackageFields * incompleteClickFields = [ADJPackageFields fields];
+
+    incompleteClickFields.deepLink = @"AdjustTests://example.com/path/inApp?adjust_foo=";
+
+    // test the second deeplink
+    [self testClickPackage:incompleteClickPackage fields:incompleteClickFields source:@"deeplink"];
 }
 
-- (void)testIad
+- (void)testIadDates
 {
     //  reseting to make the test order independent
     [self reset];
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    ADJConfig * config = [self getConfig];
 
-    // set log level
-    config.logLevel = ADJLogLevelAssert;
-
-    // start activity handler with config
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
-
-    // it's necessary to sleep the activity for a while after each handler call
-    //  to let the internal queue act
-    [NSThread sleepForTimeInterval:2.0];
-
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"6"];
-
-    // test first session start
-    [self checkFirstSession];
+    //  create handler and start the first session
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
 
     // should be ignored
     [activityHandler setIadDate:nil withPurchaseDate:nil];
-    [activityHandler setIadDate:nil withPurchaseDate:[NSDate date]];
+    [NSThread sleepForTimeInterval:1];
 
-    [NSThread sleepForTimeInterval:2];
+    // check that iAdImpressionDate was not received.
+    aDebug(@"iAdImpressionDate not received");
 
     // didn't send click package
-    anTest(@"PackageHandler addPackage");
+    anTest(@"SdkClickHandler sendSdkClick");
+
+    [activityHandler setIadDate:nil withPurchaseDate:[NSDate date]];
+    [NSThread sleepForTimeInterval:1];
+
+    // check that iAdImpressionDate was not received.
+    aDebug(@"iAdImpressionDate not received");
+
+    // didn't send click package
+    anTest(@"SdkClickHandler sendSdkClick");
 
     // 1 session
     aiEquals(1, (int)[self.packageHandlerMock.packageQueue count]);
@@ -915,19 +1105,32 @@
     [self.loggerMock test:@"date1 %@, date2 %@", date1.description, date2.description];
 
     [activityHandler setIadDate:date1 withPurchaseDate:date2];
+    [NSThread sleepForTimeInterval:1];
+
+    // iAdImpressionDate received
+    NSString * iAdImpressionDate1Log = [NSString stringWithFormat:@"iAdImpressionDate received: %@", date1];
+    aDebug(iAdImpressionDate1Log);
+
+    // first iad package added
+    aTest(@"SdkClickHandler sendSdkClick");
+
     [activityHandler setIadDate:date2 withPurchaseDate:nil];
+    [NSThread sleepForTimeInterval:1];
 
-    [NSThread sleepForTimeInterval:2];
+    // iAdImpressionDate received
+    NSString * iAdImpressionDate2Log = [NSString stringWithFormat:@"iAdImpressionDate received: %@", date2];
+    aDebug(iAdImpressionDate2Log);
 
-    // first and second iad packages
-    aTest(@"PackageHandler addPackage");
-    aTest(@"PackageHandler addPackage");
+    // second iad package added
+    aTest(@"SdkClickHandler sendSdkClick");
 
     // 1 session + 2 click packages
-    aiEquals(3, (int)[self.packageHandlerMock.packageQueue count]);
+    aiEquals(1, (int)[self.packageHandlerMock.packageQueue count]);
+
+    aiEquals(2, (int)[self.sdkClickHandlerMock.packageQueue count]);
 
     // first iad package
-    ADJActivityPackage *firstIadPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
+    ADJActivityPackage *firstIadPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[0];
 
     // create activity package test
     ADJPackageFields * firstIadFields = [ADJPackageFields fields];
@@ -939,7 +1142,7 @@
     [self testClickPackage:firstIadPackage fields:firstIadFields source:@"iad"];
 
     // second iad package
-    ADJActivityPackage * secondIadPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[2];
+    ADJActivityPackage * secondIadPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[1];
 
     // create activity package test
     ADJPackageFields * secondIadFields = [ADJPackageFields fields];
@@ -950,74 +1153,297 @@
     [self testClickPackage:secondIadPackage fields:secondIadFields source:@"iad"];
 }
 
-- (void)testFinishedTracking
+- (void)testIadDetails
+{
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler =[self startAndCheckFirstSession:config];
+
+    // test iad details
+    // should be ignored
+    NSError * errorCode0 = [[NSError alloc] initWithDomain:@"adjust" code:0 userInfo:nil];
+    NSError * errorCode1 = [[NSError alloc] initWithDomain:@"adjust" code:1 userInfo:nil];
+
+    [activityHandler setIadDetails:nil error:errorCode0 retriesLeft:-1];
+    [NSThread sleepForTimeInterval:1];
+
+    aWarn(@"Unable to read iAd details");
+    aWarn(@"Limit number of retry for iAd v3 surpassed");
+
+    [activityHandler setIadDetails:nil error:errorCode0 retriesLeft:0];
+    [NSThread sleepForTimeInterval:4];
+
+    aWarn(@"Unable to read iAd details");
+    anWarn(@"Limit number of retry for iAd v3 surpassed");
+
+    aDebug(@"iAd with 0 tries to read v3");
+    aWarn(@"Reached limit number of retry for iAd v3. Trying iAd v2");
+
+    [activityHandler setIadDetails:nil error:errorCode0 retriesLeft:1];
+    [NSThread sleepForTimeInterval:4];
+
+    aWarn(@"Unable to read iAd details");
+
+    aDebug(@"iAd with 1 tries to read v3");
+    anWarn(@"Reached limit number of retry for iAd v3. Trying iAd v2");
+
+    [activityHandler setIadDetails:nil error:errorCode1 retriesLeft:1];
+    [NSThread sleepForTimeInterval:4];
+
+    aWarn(@"Unable to read iAd details");
+    anDebug(@"iAd with 1 tries to read v3");
+
+    [activityHandler setIadDetails:nil error:nil retriesLeft:1];
+    [NSThread sleepForTimeInterval:4];
+
+    anWarn(@"Unable to read iAd details");
+    aiEquals(1, (int)[self.packageHandlerMock.packageQueue count]);
+
+    NSDateFormatter *dateFormat = [[NSDateFormatter alloc] init];
+    [dateFormat setDateFormat:@"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'Z"];
+
+    NSDate * date1 = [NSDate date];
+    NSString * date1String = [dateFormat stringFromDate:date1];
+
+    NSDictionary * attributionDetails = @{ @"iadVersion3" : @{ @"date" : date1 ,
+                                                               @"decimal" : [NSNumber numberWithDouble:0.1],
+                                                               @"string" : @"value"} };
+
+    [activityHandler setIadDetails:attributionDetails error:nil retriesLeft:1];
+    [NSThread sleepForTimeInterval:2];
+
+    aTest(@"SdkClickHandler sendSdkClick");
+    // check the number of activity packages
+    // 1 session + 1 sdk_click
+    aiEquals(1, (int)[self.packageHandlerMock.packageQueue count]);
+
+    aiEquals(1, (int)[self.sdkClickHandlerMock.packageQueue count]);
+
+    // get the click package
+    ADJActivityPackage *clickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[0];
+
+    // create activity package test
+    ADJPackageFields * clickPackageFields = [ADJPackageFields fields];
+
+    clickPackageFields.iadDetails = [NSString stringWithFormat:@"{\"iadVersion3\":{\"date\":\"%@\",\"decimal\":\"0.1\",\"string\":\"value\"}}", date1String];
+
+    // test first session
+    [self testClickPackage:clickPackage fields:clickPackageFields source:@"iad3"];
+}
+
+- (void)testSetDeviceToken {
+    // reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    //  create handler and start the first session
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
+
+    const char bytes[] = "\xFC\x07\x21\xB6\xDF\xAD\x5E\xE1\x10\x97\x5B\xB2\xA2\x63\xDE\x00\x61\xCC\x70\x5B\x4A\x85\xA8\xAE\x3C\xCF\xBE\x7A\x66\x2F\xB1\xAB";
+    [activityHandler setDeviceToken:[NSData dataWithBytes:bytes length:(sizeof(bytes) - 1)]];
+
+    [NSThread sleepForTimeInterval:1];
+
+    aTest(@"SdkClickHandler sendSdkClick");
+
+    // get the click package
+    ADJActivityPackage * deviceTokenClickPackage = (ADJActivityPackage *) self.sdkClickHandlerMock.packageQueue[0];
+
+    // create activity package test
+    ADJPackageFields * deviceTokenClickFields = [ADJPackageFields fields];
+
+    // and set it
+    deviceTokenClickFields.pushToken = @"fc0721b6dfad5ee110975bb2a263de0061cc705b4a85a8ae3ccfbe7a662fb1ab";
+
+    // test the first deeplink
+    [self testClickPackage:deviceTokenClickPackage fields:deviceTokenClickFields source:@"push"];
+}
+
+- (void)testAttributionDelegate
+{
+    // reseting to make the test order independent
+    [self reset];
+
+    ADJAttributionChangedDelegate * delegateTests = [[ADJAttributionChangedDelegate alloc] init];
+
+    [self checkFinishTasks:delegateTests
+attributionDelegatePresent:YES
+eventSuccessDelegatePresent:NO
+eventFailureDelegatePresent:NO
+sessionSuccessDelegatePresent:NO
+sessionFailureDelegatePresent:NO];
+
+}
+
+- (void)testSuccessDelegates
+{
+    // reseting to make the test order independent
+    [self reset];
+
+    ADJTrackingSucceededDelegate * successDelegate = [[ADJTrackingSucceededDelegate alloc] init];
+
+    [self checkFinishTasks:successDelegate
+attributionDelegatePresent:NO
+eventSuccessDelegatePresent:YES
+eventFailureDelegatePresent:NO
+sessionSuccessDelegatePresent:YES
+sessionFailureDelegatePresent:NO];
+
+}
+
+- (void)testFailureDelegates
+{
+    // reseting to make the test order independent
+    [self reset];
+
+    ADJTrackingFailedDelegate * failureDelegate = [[ADJTrackingFailedDelegate alloc] init];
+
+    [self checkFinishTasks:failureDelegate
+attributionDelegatePresent:NO
+eventSuccessDelegatePresent:NO
+eventFailureDelegatePresent:YES
+sessionSuccessDelegatePresent:NO
+sessionFailureDelegatePresent:YES];
+}
+
+- (void)testLaunchDeepLink
 {
     // reseting to make the test order independent
     [self reset];
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentProduction];
+    ADJConfig * config = [self getConfig];
 
-    // set verbose log level
-    config.logLevel = ADJLogLevelDebug;
+    // start the session
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
 
-    // set delegate
-    ADJDelegateTest * delegateTests = [[ADJDelegateTest alloc] init];
-    [config setDelegate:delegateTests];
-
-    //  create handler and start the first session
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
-
-    [NSThread sleepForTimeInterval:2.0];
-
-    // test init values
-    [self checkInit:ADJEnvironmentProduction logLevel:@"6"];
-
-    // test first session start
-    [self checkFirstSession];
-
-    // test nil response
     [activityHandler finishedTracking:nil];
+
     [NSThread sleepForTimeInterval:1.0];
 
     // if the response is null
-    anTest(@"AttributionHandler checkAttribution");
-    anTest(@"Unable to open deep link");
-    anTest(@"Open deep link");
+    anTest(@"AttributionHandler checkAttributionResponse");
+    anError(@"Unable to open deep link");
+    anInfo(@"Open deep link");
 
-    // set package handler to respond with a valid attribution
+    // test success session response data
+    ADJActivityPackage * sessionPackage = self.packageHandlerMock.packageQueue[0];
 
-    NSString * deeplinkString = @"{\"deeplink\":\"wrongDeeplink://\"}";
-    NSData * deeplinkData = [deeplinkString dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary * deeplinkDictionary = [ADJUtil buildJsonDict:deeplinkData];
+    ADJSessionResponseData * sessionResponseData = [ADJResponseData buildResponseData:sessionPackage];
 
-    anNil(deeplinkDictionary);
+    [activityHandler launchSessionResponseTasks:sessionResponseData];
+    [NSThread sleepForTimeInterval:2.0];
 
-    [activityHandler finishedTracking:deeplinkDictionary];
+    // does not launch deeplink from session responses anymore
+    anInfo(@"Open deep link (wrongDeeplink://)");
 
-    [NSThread sleepForTimeInterval:1.0];
+    // test attribution response
+    ADJActivityPackage * attributionPackage = self.attributionHandlerMock.attributionPackage;
+    ADJAttributionResponseData * attributionResponseData = [ADJResponseData buildResponseData:attributionPackage];
+    attributionResponseData.deeplink = [NSURL URLWithString:@"wrongDeeplink://"];
 
-    // check that it was unable to open the url
-    aError(@"Unable to open deep link (wrongDeeplink://)");
+    [activityHandler launchAttributionResponseTasks:attributionResponseData];
+    [NSThread sleepForTimeInterval:2.0];
 
-    // and it check the attribution
-    aTest(@"AttributionHandler checkAttribution");
-    // TODO add test that opens url
+    aInfo(@"Open deep link (wrongDeeplink://)");
 
     // checking the default values of the first session package
     //  should only have one package
     aiEquals(1, (int)[self.packageHandlerMock.packageQueue count]);
 
-    ADJActivityPackage *activityPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[0];
+    //ADJActivityPackage *activityPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[0];
 
     // create activity package test
-    ADJPackageFields * fields = [ADJPackageFields fields];
+    //ADJPackageFields * fields = [ADJPackageFields fields];
 
-    fields.hasDelegate = @"1";
-    fields.environment = @"production";
-
+    //fields.environment = @"production";
     // set first session
-    [self testPackageSession:activityPackage fields:fields sessionCount:@"1"];
+    //[self testPackageSession:activityPackage fields:fields sessionCount:@"1"];
+
+}
+
+- (void)testNotLaunchDeeplinkCallback {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    ADJDeeplinkNotLaunchDelegate * notLaunchDeeplinkDelegate = [[ADJDeeplinkNotLaunchDelegate alloc] init];
+
+    [config setDelegate:notLaunchDeeplinkDelegate];
+
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
+
+    // get attribution response data
+    ADJActivityPackage * attributionPackage = self.attributionHandlerMock.attributionPackage;
+
+    // try to open deeplink
+    ADJAttributionResponseData * attributionResponseData = [ADJResponseData buildResponseData:attributionPackage];
+    attributionResponseData.deeplink = [NSURL URLWithString:@"wrongDeeplink://"];
+
+    [activityHandler launchAttributionResponseTasks:attributionResponseData];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // deeplink to launch
+    aInfo(@"Open deep link (wrongDeeplink://)");
+
+    // deeplink to launch
+    aDebug(@"Launching in the background for testing");
+
+    // callback called
+    aTest(@"ADJDeeplinkNotLaunchDelegate adjustDeeplinkResponse not launch, wrongDeeplink://");
+
+    // but deeplink not launched
+    anError(@"Unable to open deep link");
+}
+
+- (void)testDeeplinkCallback
+{
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    ADJDeeplinkLaunchDelegate * launchDeeplinkDelegate = [[ADJDeeplinkLaunchDelegate alloc] init];
+
+    [config setDelegate:launchDeeplinkDelegate];
+
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
+
+    // get attribution response data
+    ADJActivityPackage * attributionPackage = self.attributionHandlerMock.attributionPackage;
+
+    // try to open deeplink
+    ADJAttributionResponseData * attributionResponseData = [ADJResponseData buildResponseData:attributionPackage];
+    attributionResponseData.deeplink = [NSURL URLWithString:@"wrongDeeplink://"];
+
+    [activityHandler launchAttributionResponseTasks:attributionResponseData];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // deeplink to launch
+    aInfo(@"Open deep link (wrongDeeplink://)");
+
+    // deeplink to launch
+    aDebug(@"Launching in the background for testing");
+
+    // callback called
+    aTest(@"ADJDeeplinkLaunchDelegate adjustDeeplinkResponse launch, wrongDeeplink://");
+
+    // and deeplink launched
+    aError(@"Unable to open deep link (wrongDeeplink://)");
 }
 
 - (void)testUpdateAttribution
@@ -1025,19 +1451,16 @@
     // reseting to make the test order independent
     [self reset];
 
-    // create the config
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
 
-    // start the session
-    id<ADJActivityHandler> activityHandler =[ADJActivityHandler handlerWithConfig:config];
+    ADJAttributionChangedDelegate * attributionChangedDelegate = [[ADJAttributionChangedDelegate alloc] init];
+    [config setDelegate:attributionChangedDelegate];
 
-    [NSThread sleepForTimeInterval:2];
+    aDebug(@"Delegate implements adjustAttributionChanged");
 
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3"];
-
-    // test first session start
-    [self checkFirstSession];
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
 
     // check if Attribution is not created with nil
     ADJAttribution * nilAttribution = [[ADJAttribution alloc] initWithJsonDict:nil];
@@ -1045,55 +1468,59 @@
     aNil(nilAttribution);
 
     // check it does not update a nil attribution
-    aFalse([activityHandler updateAttribution:nilAttribution]);
+    aFalse([activityHandler updateAttributionI:activityHandler attribution:nilAttribution]);
 
     // create an empty attribution
     NSMutableDictionary * emptyJsonDictionary = [[NSMutableDictionary alloc] init];
     ADJAttribution * emptyAttribution = [[ADJAttribution alloc] initWithJsonDict:emptyJsonDictionary];
 
     // check that updates attribution
-    aTrue([activityHandler updateAttribution:emptyAttribution]);
+    aTrue([activityHandler updateAttributionI:activityHandler attribution:emptyAttribution]);
     aDebug(@"Wrote Attribution: tt:(null) tn:(null) net:(null) cam:(null) adg:(null) cre:(null) cl:(null)");
-
-    // check that it did not launch a non existent delegate
-    // not possible to test in iOs
-    //[NSThread sleepForTimeInterval:1];
-    //anTest(@"ADJDelegateTest adjustAttributionChanged");
 
     emptyAttribution = [[ADJAttribution alloc] initWithJsonDict:emptyJsonDictionary];
 
+    // test first session package
+    ADJActivityPackage * firstSessionPackage = self.packageHandlerMock.packageQueue[0];
+    // simulate a session response with attribution data
+    ADJSessionResponseData * sessionResponseDataWithAttribution = [ADJResponseData buildResponseData:firstSessionPackage];
+
+    sessionResponseDataWithAttribution.attribution = emptyAttribution;
     // check that it does not update the attribution
-    aFalse([activityHandler updateAttribution:emptyAttribution]);
+    [activityHandler launchSessionResponseTasks:sessionResponseDataWithAttribution];
+    [NSThread sleepForTimeInterval:1];
+
     anDebug(@"Wrote Attribution");
 
     // end session
-    [activityHandler trackSubsessionEnd];
+    [self stopActivity:activityHandler];
     [NSThread sleepForTimeInterval:2];
 
     [self checkEndSession];
 
     // create the new config
-    config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    config = [self getConfig];
 
     // set delegate to see attribution launched
-    ADJDelegateTest * delegateTests = [[ADJDelegateTest alloc] init];
-    [config setDelegate:delegateTests];
+    [config setDelegate:attributionChangedDelegate];
 
-    id<ADJActivityHandler> restartActivityHandler = [ADJActivityHandler handlerWithConfig:config];
+    ADJActivityHandlerConstructorState * restartCState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+    restartCState.readActivityState = @"ec:0 sc:1 ssc:1";
+    restartCState.readAttribution = @"tt:(null) tn:(null) net:(null) cam:(null) adg:(null) cre:(null) cl:(null)";
+    id<ADJActivityHandler> restartActivityHandler = [self getActivityHandler:restartCState];
 
-    [NSThread sleepForTimeInterval:3];
+    [NSThread sleepForTimeInterval:2];
+
+    ADJSessionState * firstRestart = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    firstRestart.subsessionCount = 2;
+    firstRestart.timerAlreadyStarted = NO;
+    firstRestart.toSend = NO;
 
     // test init values
-    [self checkInit:ADJEnvironmentSandbox
-           logLevel:@"3"
-  readActivityState:@"ec:0 sc:1 ssc:1"
-    readAttribution:@"tt:(null) tn:(null) net:(null) cam:(null) adg:(null) cre:(null) cl:(null)"];
-
-    // test second subsession
-    [self checkSubsession:1 subSessionCount:2 timerAlreadyStarted:NO];
+    [self checkInitAndStartTestsWithHandler:restartActivityHandler sessionState:firstRestart];
 
     // check that it does not update the attribution after the restart
-    aFalse([restartActivityHandler updateAttribution:emptyAttribution]);
+    aFalse([restartActivityHandler updateAttributionI:activityHandler attribution:emptyAttribution]);
     anDebug(@"Wrote Attribution");
 
     // new attribution
@@ -1107,49 +1534,66 @@
                                         "\"click_label\"   : \"clValue\" }";
 
     NSData * firstAttributionData = [firstAttributionString dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary * firstAttributionDictionary = [ADJUtil buildJsonDict:firstAttributionData];
+    NSError *error = nil;
+    NSException *exception = nil;
+
+    NSDictionary * firstAttributionDictionary = [ADJUtil buildJsonDict:firstAttributionData exceptionPtr:&exception errorPtr:&error];
 
     anNil(firstAttributionDictionary);
 
     ADJAttribution * firstAttribution = [[ADJAttribution alloc] initWithJsonDict:firstAttributionDictionary];
 
     //check that it updates
-    aTrue([restartActivityHandler updateAttribution:firstAttribution]);
+    sessionResponseDataWithAttribution.attribution = firstAttribution;
+    [restartActivityHandler launchSessionResponseTasks:sessionResponseDataWithAttribution];
+    [NSThread sleepForTimeInterval:1];
+
     aDebug(@"Wrote Attribution: tt:ttValue tn:tnValue net:nValue cam:cpValue adg:aValue cre:ctValue cl:clValue");
+    aDebug(@"Launching in the background for testing");
+    aTest(@"ADJAttributionChangedDelegate adjustAttributionChanged, tt:ttValue tn:tnValue net:nValue cam:cpValue adg:aValue cre:ctValue cl:clValue");
 
-    // check that it launch the saved attribute
-    // not possible to test in iOs
-    //[NSThread sleepForTimeInterval:2];
-    //aTest(@"ADJDelegateTest adjustAttributionChanged, tt:null tn:null net:null cam:null adg:null cre:null cl:null");
+    // test first session package
+    ADJActivityPackage * attributionPackage = self.attributionHandlerMock.attributionPackage;
+    // simulate a session response with attribution data
+    ADJAttributionResponseData * attributionResponseDataWithAttribution = [ADJResponseData buildResponseData:attributionPackage];
 
+    attributionResponseDataWithAttribution.attribution = firstAttribution;
     // check that it does not update the attribution
-    aFalse([restartActivityHandler updateAttribution:firstAttribution]);
+    [restartActivityHandler launchAttributionResponseTasks:attributionResponseDataWithAttribution];
+    [NSThread sleepForTimeInterval:1];
+
     anDebug(@"Wrote Attribution");
+    anTest(@"ADJAttributionChangedDelegate adjustAttributionChanged");
 
     // end session
-    [restartActivityHandler trackSubsessionEnd];
-    [NSThread sleepForTimeInterval:2];
+    [self stopActivity:restartActivityHandler];
+    [NSThread sleepForTimeInterval:1];
 
     [self checkEndSession];
 
     // create the new config
-    config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    config = [self getConfig];
 
     // set delegate to see attribution launched
-    [config setDelegate:delegateTests];
+    [config setDelegate:attributionChangedDelegate];
 
-    id<ADJActivityHandler> secondRestartActivityHandler = [ADJActivityHandler handlerWithConfig:config];
+    ADJActivityHandlerConstructorState * secondRestartCState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+    secondRestartCState.readActivityState = @"ec:0 sc:1 ssc:2";
+    secondRestartCState.readAttribution = @"tt:ttValue tn:tnValue net:nValue cam:cpValue adg:aValue cre:ctValue cl:clValue";
 
-    [NSThread sleepForTimeInterval:3];
+    id<ADJActivityHandler> secondRestartActivityHandler = [self getActivityHandler:secondRestartCState];
 
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3" readActivityState:@"ec:0 sc:1 ssc:2" readAttribution:@"tt:ttValue tn:tnValue net:nValue cam:cpValue adg:aValue cre:ctValue cl:clValue"];
+    [NSThread sleepForTimeInterval:2];
 
-    // test third subsession
-    [self checkSubsession:1 subSessionCount:3 timerAlreadyStarted:NO];
+    ADJSessionState * secondRestart = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    secondRestart.subsessionCount = 3;
+    secondRestart.timerAlreadyStarted = NO;
+    secondRestart.toSend = NO;
+
+    [self checkInitAndStartTestsWithHandler:secondRestartActivityHandler sessionState:secondRestart];
 
     // check that it does not update the attribution after the restart
-    aFalse([secondRestartActivityHandler updateAttribution:firstAttribution]);
+    aFalse([secondRestartActivityHandler updateAttributionI:secondRestartActivityHandler attribution:firstAttribution]);
     anDebug(@"Wrote Attribution");
 
     // new attribution
@@ -1163,25 +1607,25 @@
                                         "\"click_label\"   : \"clValue2\" }";
 
     NSData * secondAttributionData = [secondAttributionString dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary * secondAttributionDictionary = [ADJUtil buildJsonDict:secondAttributionData];
+    NSDictionary * secondAttributionDictionary = [ADJUtil buildJsonDict:secondAttributionData exceptionPtr:&exception errorPtr:&error];
 
     anNil(secondAttributionDictionary);
 
     ADJAttribution * secondAttribution = [[ADJAttribution alloc] initWithJsonDict:secondAttributionDictionary];
 
     //check that it updates
-    aTrue([secondRestartActivityHandler updateAttribution:secondAttribution]);
-    aDebug(@"Wrote Attribution: tt:ttValue2 tn:tnValue2 net:nValue2 cam:cpValue2 adg:aValue2 cre:ctValue2 cl:clValue2");
+    attributionResponseDataWithAttribution.attribution = secondAttribution;
 
-    // check that it launch the saved attribute
-    // not possible to test in iOs
-    //[NSThread sleepForTimeInterval:1];
-    //aTest(@"onAttributionChanged: tt:ttValue2 tn:tnValue2 net:nValue2 cam:cpValue2 adg:aValue2 cre:ctValue2 cl:clValue2");
+    [secondRestartActivityHandler launchAttributionResponseTasks:attributionResponseDataWithAttribution];
+    [NSThread sleepForTimeInterval:1];
+
+    aDebug(@"Wrote Attribution: tt:ttValue2 tn:tnValue2 net:nValue2 cam:cpValue2 adg:aValue2 cre:ctValue2 cl:clValue2");
+    aDebug(@"Launching in the background for testing");
+    aTest(@"ADJAttributionChangedDelegate adjustAttributionChanged, tt:ttValue2 tn:tnValue2 net:nValue2 cam:cpValue2 adg:aValue2 cre:ctValue2 cl:clValue2");
 
     // check that it does not update the attribution
-    aFalse([secondRestartActivityHandler updateAttribution:secondAttribution]);
+    aFalse([secondRestartActivityHandler updateAttributionI:secondRestartActivityHandler attribution:secondAttribution]);
     anDebug(@"Wrote Attribution");
-
 }
 
 - (void)testOfflineMode
@@ -1194,26 +1638,56 @@
     [ADJAdjustFactory setSubsessionInterval:(0.5)]; // 1/2 second
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    ADJConfig * config = [self getConfig];
 
     // start activity handler with config
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    ADJInternalState * internalState = [activityHandler internalState];
+
+    // check that it is online
+    aTrue([internalState isOnline]);
 
     // put SDK offline
     [activityHandler setOfflineMode:YES];
 
-    [NSThread sleepForTimeInterval:3];
+    aTrue([internalState isOffline]);
+
+    // not writing activity state because it set enable does not start the sdk
+    anDebug(@"Wrote Activity state");
 
     // check if message the disable of the SDK
-    aInfo(@"Pausing package and attribution handler to put in offline mode");
+    aInfo(@"Handlers will start paused due to SDK being offline");
+
+    [NSThread sleepForTimeInterval:3.0];
 
     // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3"];
+    [self checkInitAndStartTestsWithHandler:activityHandler];
 
-    // test first session start
-    [self checkFirstSession:YES];
+    // offline runs after start
+    [self checkHandlerStatus:YES];
 
-    // test end session logs
+    // start the second session
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1];
+
+    // test second session start
+    ADJSessionState * secondSessionStartPaused = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+
+    secondSessionStartPaused.sessionCount = 2;
+    secondSessionStartPaused.toSend = NO;
+    secondSessionStartPaused.foregroundTimerStarts = NO;
+    secondSessionStartPaused.foregroundTimerAlreadyStarted = NO;
+
+    // check session that is paused
+    [self checkStartInternal:secondSessionStartPaused];
+
+    [self stopActivity:activityHandler];
+
+    [NSThread sleepForTimeInterval:1];
+
+    // test end session of disable
     [self checkEndSession];
 
     // disable the SDK
@@ -1223,35 +1697,34 @@
     aFalse([activityHandler isEnabled]);
 
     // writing activity state after disabling
-    aDebug(@"Wrote Activity state: ec:0 sc:1 ssc:1");
+    aDebug(@"Wrote Activity state: ec:0 sc:2 ssc:1");
 
     // check if message the disable of the SDK
-    aInfo(@"Pausing package handler and attribution handler to disable the SDK");
+    aInfo(@"Pausing handlers due to SDK being disabled");
 
     [NSThread sleepForTimeInterval:1];
 
-    // test end session logs
-    [self checkEndSession];
+    [self checkHandlerStatus:YES];
 
     // put SDK back online
     [activityHandler setOfflineMode:NO];
 
-    aInfo(@"Package and attribution handler remain paused because the SDK is disabled");
+    aInfo(@"Handlers remain paused");
 
     [NSThread sleepForTimeInterval:1];
 
-    // doesn't pause if it was already paused
-    anTest(@"AttributionHandler pauseSending");
-    anTest(@"PackageHandler pauseSending");
+    // even though it will remained paused,
+    // it will update the status to paused
+    [self checkHandlerStatus:YES];
 
     // try to do activities while SDK disabled
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [activityHandler trackEvent:[ADJEvent eventWithEventToken:@"event1"]];
 
     [NSThread sleepForTimeInterval:3];
 
     // check that timer was not executed
-    [self checkTimerIsFired:NO];
+    [self checkForegroundTimerFired:NO];
 
     // check that it did not wrote activity state from new session or subsession
     anDebug(@"Wrote Activity state");
@@ -1259,19 +1732,42 @@
     // check that it did not add any package
     anTest(@"PackageHandler addPackage");
 
+    // end the session
+    [self stopActivity:activityHandler];
+
+    [NSThread sleepForTimeInterval:1];
+
+    ADJEndSessionState * endStateDoNotPause = [[ADJEndSessionState alloc] init];
+    endStateDoNotPause.updateActivityState = NO;
+
+    [self checkEndSession:endStateDoNotPause];
+
     // enable the SDK again
     [activityHandler setEnabled:YES];
 
     // check that is enabled
     aTrue([activityHandler isEnabled]);
 
-    [NSThread sleepForTimeInterval:1];
+    [NSThread sleepForTimeInterval:3];
+
+    aDebug(@"Wrote Activity state");
 
     // check that it re-enabled
-    aInfo(@"Resuming package handler and attribution handler to enabled the SDK");
+    aInfo(@"Resuming handlers due to SDK being enabled");
+
+    // it is still paused because it's on the background
+    [self checkHandlerStatus:YES];
+
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1];
+
+    ADJSessionState * thirdSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    thirdSessionState.sessionCount = 3;
+    thirdSessionState.toSend = YES;
 
     // test that is not paused anymore
-    [self checkNewSession:NO sessionCount:2 eventCount:0];
+    [self checkStartInternal:thirdSessionState];
 }
 
 - (void)testGetAttribution
@@ -1280,33 +1776,28 @@
     [self reset];
 
     //  adjust the intervals for testing
-    [ADJAdjustFactory setTimerStart:0.5]; // 0.5 second
+    //[ADJAdjustFactory setTimerStart:0.5]; // 0.5 second
     [ADJAdjustFactory setSessionInterval:(4)]; // 4 second
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    ADJConfig * config = [self getConfig];
 
     // set delegate
-    ADJDelegateTest * delegateTests = [[ADJDelegateTest alloc] init];
-    [config setDelegate:delegateTests];
+    ADJAttributionChangedDelegate * attributionChangedDelegate = [[ADJAttributionChangedDelegate alloc] init];
+    [config setDelegate:attributionChangedDelegate];
 
     //  create handler and start the first session
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
 
-    // it's necessary to sleep the activity for a while after each handler call
-    //  to let the internal queue act
-    [NSThread sleepForTimeInterval:3.0];
-
-    // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3"];
+    [NSThread sleepForTimeInterval:2.0];
 
     /***
-     * // if it' a new session
+     *  if it' a new session
      * if (self.activityState.subsessionCount <= 1) {
      *     return;
      * }
      *
-     * // if there is already an attribution saved and there was no attribution being asked
+     *  if there is already an attribution saved and there was no attribution being asked
      * if (self.attribution != nil && !self.activityState.askingAttribution) {
      *     return;
      * }
@@ -1320,10 +1811,11 @@
     // -> Not called
 
     // test first session start
-    [self checkFirstSession];
+    ADJSessionState * newSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    newSessionState.getAttributionIsCalled = [NSNumber numberWithBool:NO];
 
-    // test that get attribution wasn't called
-    anTest(@"AttributionHandler getAttribution");
+    // test init values
+    [self checkInitAndStartTestsWithHandler:activityHandler sessionState:newSessionState];
 
     // subsession count increased to 2
     // attribution is still null,
@@ -1331,10 +1823,10 @@
     // -> Called
 
     // trigger a new sub session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:1 subSessionCount:2 timerAlreadyStarted:YES getAttributionIsCalled:YES];
+    [self checkSubSession:1 subsessionCount:2 getAttributionIsCalled:YES];
 
     // subsession count increased to 3
     // attribution is still null,
@@ -1346,10 +1838,10 @@
     aDebug(@"Wrote Activity state: ec:0 sc:1 ssc:2");
 
     // trigger a new session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:1 subSessionCount:3 timerAlreadyStarted:YES getAttributionIsCalled:YES];
+    [self checkSubSession:1 subsessionCount:3 getAttributionIsCalled:YES];
 
     // subsession is reset to 1 with new session
     // attribution is still null,
@@ -1357,10 +1849,10 @@
     // -> Not called
 
     [NSThread sleepForTimeInterval:3.0]; // 5 seconds = 2 + 3
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:2 subSessionCount:1 timerAlreadyStarted:YES getAttributionIsCalled:NO];
+    [self checkFurtherSessions:2 getAttributionIsCalled:NO];
 
     // subsession count increased to 2
     // attribution is set,
@@ -1377,23 +1869,25 @@
                                     "\"click_label\"   : \"clValue\" }";
 
     NSData * attributionData = [attributionString dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary * attributionDictionary = [ADJUtil buildJsonDict:attributionData];
+    NSError *error = nil;
+    NSException *exception = nil;
+    NSDictionary * attributionDictionary = [ADJUtil buildJsonDict:attributionData exceptionPtr:&exception errorPtr:&error];
 
     anNil(attributionDictionary);
 
     ADJAttribution * attribution = [[ADJAttribution alloc] initWithJsonDict:attributionDictionary];
 
     // update the attribution
-    [activityHandler updateAttribution:attribution];
+    [activityHandler updateAttributionI:activityHandler attribution:attribution];
 
     // attribution was updated
     aDebug(@"Wrote Attribution: tt:ttValue tn:tnValue net:nValue cam:cpValue adg:aValue cre:ctValue cl:clValue");
 
     // trigger a new sub session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:2 subSessionCount:2 timerAlreadyStarted:YES getAttributionIsCalled:YES];
+    [self checkSubSession:2 subsessionCount:2 getAttributionIsCalled:YES];
 
     // subsession count is reset to 1
     // attribution is set,
@@ -1401,10 +1895,10 @@
     // -> Not called
 
     [NSThread sleepForTimeInterval:3.0]; // 5 seconds = 2 + 3
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:3 subSessionCount:1 timerAlreadyStarted:YES getAttributionIsCalled:NO];
+    [self checkFurtherSessions:3 getAttributionIsCalled:NO];
 
     // subsession increased to 2
     // attribution is set,
@@ -1415,10 +1909,10 @@
     aDebug(@"Wrote Activity state: ec:0 sc:3 ssc:1");
 
     // trigger a new sub session
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:3 subSessionCount:2 timerAlreadyStarted:YES getAttributionIsCalled:NO];
+    [self checkSubSession:3 subsessionCount:2 getAttributionIsCalled:NO];
 
     // subsession is reset to 1
     // attribution is set,
@@ -1426,81 +1920,1078 @@
     // -> Not called
 
     [NSThread sleepForTimeInterval:3.0]; // 5 seconds = 2 + 3
-    [activityHandler trackSubsessionStart];
+    [activityHandler applicationDidBecomeActive];
     [NSThread sleepForTimeInterval:2.0];
 
-    [self checkSubsession:4 subSessionCount:1 timerAlreadyStarted:YES getAttributionIsCalled:NO];
+    [self checkFurtherSessions:4 getAttributionIsCalled:NO];
 }
 
-- (void)testTimer
+- (void)testForegroundTimer
 {
     //  reseting to make the test order independent
     [self reset];
 
     //  change the timer defaults
     [ADJAdjustFactory setTimerInterval:4];
-    [ADJAdjustFactory setTimerStart:0];
+    [ADJAdjustFactory setTimerStart:4];
 
     // create the config to start the session
-    ADJConfig * config = [ADJConfig configWithAppToken:@"123456789012" environment:ADJEnvironmentSandbox];
+    ADJConfig * config = [self getConfig];
+
+    // create handler and start the first session
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.foregroundTimerCycle = 4;
+    initState.foregroundTimerStart = 4;
+    [self checkInitTests:initState];
+
+    [self checkFirstSession];
+
+    [activityHandler applicationDidBecomeActive];
+    [NSThread sleepForTimeInterval:5.0];
+
+    ADJSessionState * subSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    subSessionState.subsessionCount = 2;
+    subSessionState.toSend = YES;
+
+    [self checkStartInternal:subSessionState];
+
+    // wait enough to fire the first cycle
+    [self checkForegroundTimerFired:YES];
+
+    // end subsession to stop timer
+    [activityHandler applicationWillResignActive];
+
+    // don't wait enough for a new cycle
+    [NSThread sleepForTimeInterval:2];
+
+    // start a new session
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1];
+
+    // check that not enough time passed to fire again
+    //[self checkForegroundTimerFired:NO];
+
+    // enough time passed since it was suspended
+    [self checkForegroundTimerFired:YES];
+
+/*
+    // end subsession to stop timer
+    [activityHandler applicationWillResignActive];
+
+    // wait enough for a new cycle
+    [NSThread sleepForTimeInterval:6];
+
+    // start a new session
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1];
+
+    // check that enough time passed to fire again
+    [self checkForegroundTimerFired:YES];
+    */
+}
+
+- (void)testSendBackground {
+    //  reseting to make the test order independent
+    [self reset];
+
+    [ADJAdjustFactory setTimerInterval:4];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    // enable send in the background
+    [config setSendInBackground:YES];
+
+    // create activity handler without starting
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // handlers start sending
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.startsSending = YES;
+    initState.sendInBackgroundConfigured = YES;
+    initState.foregroundTimerCycle = 4;
+
+    // test session
+    ADJSessionState * sesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    sesssionState.sendInBackgroundConfigured = YES;
+    sesssionState.toSend = YES;
+
+    [self checkInitAndStart:initState sessionState:sesssionState];
+
+    ADJSessionState * nonSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeNonSession];
+    //subSessionState.subsessionCount = 2;
+    nonSessionState.toSend = YES;
+    [self checkStartInternal:nonSessionState];
+
+    // end subsession
+    // background timer starts
+    [self stopActivity:activityHandler];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // session end does not pause the handlers
+    ADJEndSessionState * endSession1 = [[ADJEndSessionState alloc] init];
+    endSession1.pausing = NO;
+    endSession1.checkOnPause = YES;
+    endSession1.backgroundTimerStarts = YES;
+
+    [self checkEndSession:endSession1];
+
+    // end subsession again
+    // to test if background timer starts again
+    [self stopActivity:activityHandler];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    ADJEndSessionState * endSession2 = [[ADJEndSessionState alloc] init];
+    endSession2.pausing = NO;
+    endSession2.checkOnPause = YES;
+    endSession2.forgroundAlreadySuspended = YES;
+
+    // session end does not pause the handlers
+    [self checkEndSession:endSession2];
+
+    // wait for background timer launch
+    [NSThread sleepForTimeInterval:3.0];
+
+    // background timer fired
+    aTest(@"PackageHandler sendFirstPackage");
+
+    // wait enough time
+    [NSThread sleepForTimeInterval:3.0];
+
+    // check that background timer does not fire again
+    anTest(@"PackageHandler sendFirstPackage");
+
+    [activityHandler trackEvent:[ADJEvent eventWithEventToken:@"abc123"]];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // check that event package was added
+    aTest(@"PackageHandler addPackage");
+
+    // check that event was sent to package handler
+    aTest(@"PackageHandler sendFirstPackage");
+
+    // and not buffered
+    anInfo(@"Buffered event");
+
+    // does fire background timer
+    aVerbose(@"Background timer starting. Launching in 4.0 seconds");
+
+    // after tracking the event it should write the activity state
+    aDebug(@"Wrote Activity state");
+
+    // disable and enable the sdk while in the background
+    [activityHandler setEnabled:NO];
+
+    // check that it is disabled
+    aFalse([activityHandler isEnabled]);
+
+    // check if message the disable of the SDK
+    aInfo(@"Pausing handlers due to SDK being disabled");
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // handlers being paused because of the disable
+    [self checkHandlerStatus:YES];
+
+    [activityHandler setEnabled:YES];
+
+    // check that it is enabled
+    aTrue([activityHandler isEnabled]);
+
+    // check if message the enable of the SDK
+    aInfo(@"Resuming handlers due to SDK being enabled");
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // handlers being resumed because of the enable
+    // even in the background because of the sendInBackground option
+    [self checkHandlerStatus:NO];
+
+    // set offline and online the sdk while in the background
+    [activityHandler setOfflineMode:YES];
+
+    ADJInternalState * internalState = [activityHandler internalState];
+
+    // check that it is offline
+    aTrue([internalState isOffline]);
+
+    // check if message the offline of the SDK
+    aInfo(@"Pausing handlers to put SDK offline mode");
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // handlers being paused because of the offline
+    [self checkHandlerStatus:YES];
+
+    [activityHandler setOfflineMode:NO];
+
+    // check that it is online
+    aTrue([internalState isOnline]);
+
+    // check if message the online of the SDK
+    aInfo(@"Resuming handlers to put SDK in online mode");
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // handlers being resumed because of the online
+    // even in the background because of the sendInBackground option
+    [self checkHandlerStatus:NO];
+}
+
+- (void)testConvertUniversalLink
+{
+    //  reseting to make the test order independent
+    [self reset];
+
+    // nil url
+    aNil([ADJUtil convertUniversalLink:nil scheme:nil]);
+    aError(@"Received universal link is nil");
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnonnull"
+    NSURL* nilStringUrl = [NSURL URLWithString:nil];
+#pragma clang diagnostic pop
+
+    // empty url
+    aNil([ADJUtil convertUniversalLink:nilStringUrl scheme:nil]);
+    aError(@"Received universal link is nil");
+
+    // nil scheme
+    NSString * nilScheme = nil;
+
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@""] scheme:nilScheme]);
+    aWarn(@"Non-empty scheme required, using the scheme \"AdjustUniversalScheme\"");
+    aInfo(@"Converted deeplink from universal link AdjustUniversalScheme://");
+
+    // empty Scheme
+    NSString * emptyScheme = @"";
+
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@""] scheme:emptyScheme]);
+    aWarn(@"Non-empty scheme required, using the scheme \"AdjustUniversalScheme\"");
+    aInfo(@"Converted deeplink from universal link AdjustUniversalScheme://");
+
+    // custom scheme empty path
+    NSString * adjustScheme = @"AdjustTestScheme";
+
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@""] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://");
+
+    // non Universal Url
+    NSURL * nonUniversalUrl = [NSURL URLWithString:@"AdjustTestScheme://nonUniversalUrl"];
+    aNil([ADJUtil convertUniversalLink:nonUniversalUrl scheme:adjustScheme]);
+    aError(@"Url doesn't match as universal link or short version");
+
+    // path /
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://");
+
+    // path /yourpath
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/yourpath"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath");
+
+    // path /yourpath/
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/yourpath/"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath/");
+
+    // path yourpath
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"yourpath"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath");
+
+    // path yourpath/
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"yourpath/"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath/");
+
+    // path / query ?key=value&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?key=value&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?key=value&foo=bar");
+
+    // path /yourpath query ?key=value&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/yourpath?key=value&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath?key=value&foo=bar");
+
+    // path /yourpath/ query ?key=value&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/yourpath/?key=value&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath/?key=value&foo=bar");
+
+    // path yourpath query ?key=value&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"yourpath?key=value&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath?key=value&foo=bar");
+
+    // path yourpath/ query ?key=value&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"yourpath/?key=value&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath/?key=value&foo=bar");
+
+    // empty path/query fragment #
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"#"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://#");
+
+    // empty path/query fragment #fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://#fragment");
+
+    // path /yourpath/ fragment #fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/yourpath/#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath/#fragment");
+
+    // path yourpath fragment #fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"yourpath#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath#fragment");
+
+    // empty path query ?key=value&foo=bar fragment #fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"?key=value&foo=bar#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?key=value&foo=bar#fragment");
+
+    // path /yourpath/ query ?key=value&foo=bar fragment #fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/yourpath/?key=value&foo=bar#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath/?key=value&foo=bar#fragment");
+
+    // path yourpath query ?key=value&foo=bar fragment #fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"yourpath?key=value&foo=bar#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://yourpath?key=value&foo=bar#fragment");
+}
+
+- (void)testRemoveRedirect
+{
+    //  reseting to make the test order independent
+    [self reset];
+
+    // custom scheme empty path
+    NSString * adjustScheme = @"AdjustTestScheme";
+
+    // path / query ?key=value&foo=bar&adjust_redirect=test
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?key=value&foo=bar&adjust_redirect=test"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?key=value&foo=bar");
+
+    // path / query ?key=value&adjust_redirect=test&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?key=value&adjust_redirect=test&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?key=value&foo=bar");
+
+    // path / query ?adjust_redirect=test&key=value&foo=bar
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?adjust_redirect=test&key=value&foo=bar"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?key=value&foo=bar");
+
+    // path / query ?adjust_redirect=test
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?adjust_redirect=test"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://");
+
+    // path / query ?key=value&foo=bar&adjust_redirect=test#fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?key=value&foo=bar&adjust_redirect=test#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?key=value&foo=bar#fragment");
+
+    // path / query ?adjust_redirect=test#fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?adjust_redirect=test#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://#fragment");
+
+    // path / query ?adjust_redirect=test&foo=bar#fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?adjust_redirect=test&foo=bar#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?foo=bar#fragment");
+
+    // path / query ?foo=bar&adjust_redirect=test#fragment
+    anNil([ADJUtil convertUniversalLink:[self getUniversalLinkUrl:@"/?foo=bar&adjust_redirect=test#fragment"] scheme:adjustScheme]);
+    aInfo(@"Converted deeplink from universal link AdjustTestScheme://?foo=bar#fragment");
+}
+
+- (void)testSessionParameters {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
 
     //  create handler and start the first session
-    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:config];
+    ADJActivityHandlerConstructorState * cState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+    cState.sessionParametersActionsArray = @[^(ADJActivityHandler * activityHandler)
+    {
+        //
+        [activityHandler addSessionCallbackParameterI:activityHandler key:@"cKey" value:@"cValue"];
+        [activityHandler addSessionCallbackParameterI:activityHandler key:@"cFoo" value:@"cBar"];
 
-    // it's necessary to sleep the activity for a while after each handler call
-    //  to let the internal queue act
+        [activityHandler addSessionCallbackParameterI:activityHandler key:@"cKey" value:@"cValue2"];
+        [activityHandler resetSessionCallbackParametersI:activityHandler];
+
+        [activityHandler addSessionCallbackParameterI:activityHandler key:@"cKey" value:@"cValue"];
+        [activityHandler addSessionCallbackParameterI:activityHandler key:@"cFoo" value:@"cBar"];
+        [activityHandler removeSessionCallbackParameterI:activityHandler key:@"cKey"];
+
+        //
+        [activityHandler addSessionPartnerParameterI:activityHandler key:@"pKey" value:@"pValue"];
+        [activityHandler addSessionPartnerParameterI:activityHandler key:@"pFoo" value:@"pBar"];
+
+        [activityHandler addSessionPartnerParameterI:activityHandler key:@"pKey" value:@"pValue2"];
+        [activityHandler resetSessionPartnerParametersI:activityHandler];
+
+        [activityHandler addSessionPartnerParameterI:activityHandler key:@"pKey" value:@"pValue"];
+        [activityHandler addSessionPartnerParameterI:activityHandler key:@"pFoo" value:@"pBar"];
+        [activityHandler removeSessionPartnerParameterI:activityHandler key:@"pKey"];
+    }];
+
+    ADJEvent * firstEvent = [ADJEvent eventWithEventToken:@"abc123"];
+
+    id<ADJActivityHandler> activityHandler = [self getActivityHandler:cState];
+
+    // track event
+    [activityHandler trackEvent:firstEvent];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    //
+    aDebug(@"Wrote Session Callback parameters: {\n    cKey = cValue;\n}");
+    aDebug(@"Wrote Session Callback parameters: {\n    cFoo = cBar;\n    cKey = cValue;\n}");
+
+    aWarn(@"Key cKey will be overwritten");
+    aDebug(@"Wrote Session Callback parameters: {\n    cFoo = cBar;\n    cKey = cValue2;\n}");
+
+    aDebug(@"Wrote Session Callback parameters: (null)");
+
+    anWarn(@"Key cKey will be overwritten"); // XXX
+    aDebug(@"Wrote Session Callback parameters: {\n    cKey = cValue;\n}");
+    aDebug(@"Wrote Session Callback parameters: {\n    cFoo = cBar;\n    cKey = cValue;\n}");
+
+    aDebug(@"Key cKey will be removed");
+    aDebug(@"Wrote Session Callback parameters: {\n    cFoo = cBar;\n}");
+
+    //
+    aDebug(@"Wrote Session Partner parameters: {\n    pKey = pValue;\n}");
+    aDebug(@"Wrote Session Partner parameters: {\n    pFoo = pBar;\n    pKey = pValue;\n}");
+
+    aWarn(@"Key pKey will be overwritten");
+    aDebug(@"Wrote Session Partner parameters: {\n    pFoo = pBar;\n    pKey = pValue2;\n}");
+
+    aDebug(@"Wrote Session Partner parameters: (null)");
+
+    anWarn(@"Key pKey will be overwritten"); // XXX
+    aDebug(@"Wrote Session Partner parameters: {\n    pKey = pValue;\n}");
+    aDebug(@"Wrote Session Partner parameters: {\n    pFoo = pBar;\n    pKey = pValue;\n}");
+
+    aDebug(@"Key pKey will be removed");
+    aDebug(@"Wrote Session Partner parameters: {\n    pFoo = pBar;\n}");
+
+    [self checkInitAndStartTestsWithHandler:activityHandler];
+
+    // check that event package was added
+    aTest(@"PackageHandler addPackage");
+
+    // check that event was sent to package handler
+    aTest(@"PackageHandler sendFirstPackage");
+
+    // after tracking the event it should write the activity state
+    aDebug(@"Wrote Activity state: ec:1 sc:1 ssc:1");
+
+    // 1 session + 1 event
+    aiEquals(2, (int)[self.packageHandlerMock.packageQueue count]);
+
+    // get the session package
+    ADJActivityPackage * sessionPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[0];
+
+    // create event package test
+    ADJPackageFields * sessionPackageFields = [ADJPackageFields fields];
+
+    // set event test parameters
+    sessionPackageFields.callbackParameters = @"{\"cFoo\":\"cBar\"}";
+    sessionPackageFields.partnerParameters = @"{\"pFoo\":\"pBar\"}";
+
+    [self testPackageSession:sessionPackage fields:sessionPackageFields sessionCount:@"1"];
+
+    // get the event
+    ADJActivityPackage * eventPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
+
+    // create event package test
+    ADJPackageFields * eventPackageFields = [ADJPackageFields fields];
+
+    // set event test parameters
+    eventPackageFields.eventCount = @"1";
+    eventPackageFields.suffix = @"'abc123'";
+    eventPackageFields.callbackParameters = @"{\"cFoo\":\"cBar\"}";
+    eventPackageFields.partnerParameters = @"{\"pFoo\":\"pBar\"}";
+
+    [self testEventPackage:eventPackage fields:eventPackageFields eventToken:@"abc123"];
+
+    // end current session
+    [activityHandler applicationWillResignActive];
+    [NSThread sleepForTimeInterval:1.0];
+
+    [self checkEndSession];
+    [activityHandler teardown:NO];
+    activityHandler = nil;
+    [NSThread sleepForTimeInterval:1.0];
+
+    // start new one
+    ADJActivityHandlerConstructorState * cRestartState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+    cRestartState.readActivityState = @"";
+
+    id<ADJActivityHandler> restartActivityHandler = [self getActivityHandler:cRestartState];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // test init values
+    ADJInitState * restartInitState = [[ADJInitState alloc] initWithActivityHandler:restartActivityHandler];
+
+    // delay start not configured because activity state is already created
+    restartInitState.activityStateAlreadyCreated = YES;
+    restartInitState.readCallbackParameters = @"{\n    cFoo = cBar;\n}";
+    restartInitState.readPartnerParameters = @"{\n    pFoo = pBar;\n}";
+
+    ADJSessionState * restartSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    restartSessionState.subsessionCount = 2;
+    restartSessionState.eventCount = 1;
+
+    [self checkInitAndStart:restartInitState sessionState:restartSessionState];
+
+    ADJEvent * event1 = [ADJEvent eventWithEventToken:@"abc123"];
+    [event1 addCallbackParameter:@"ceFoo" value:@"ceBar"];
+    [event1 addPartnerParameter:@"peFoo" value:@"peBar"];
+
+    [restartActivityHandler trackEvent:event1];
+
+    ADJEvent * event2 = [ADJEvent eventWithEventToken:@"abc123"];
+    [event2 addCallbackParameter:@"cFoo" value:@"ceBar"];
+    [event2 addPartnerParameter:@"pFoo" value:@"peBar"];
+
+    [restartActivityHandler trackEvent:event2];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // 2 events
+    aiEquals(2, (int)[self.packageHandlerMock.packageQueue count]);
+
+    // get the event
+    ADJActivityPackage * firstEventPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[0];
+
+    // create event package test
+    ADJPackageFields * firstEventPackageFields = [ADJPackageFields fields];
+
+    // set event test parameters
+    firstEventPackageFields.eventCount = @"2";
+    firstEventPackageFields.suffix = @"'abc123'";
+    firstEventPackageFields.callbackParameters = @"{\"cFoo\":\"cBar\",\"ceFoo\":\"ceBar\"}";
+    firstEventPackageFields.partnerParameters = @"{\"pFoo\":\"pBar\",\"peFoo\":\"peBar\"}";
+
+    [self testEventPackage:firstEventPackage fields:firstEventPackageFields eventToken:@"abc123"];
+
+    // get the event
+    ADJActivityPackage * secondEventPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
+
+    // create event package test
+    ADJPackageFields * secondEventPackageFields = [ADJPackageFields fields];
+
+    // set event test parameters
+    secondEventPackageFields.eventCount = @"3";
+    secondEventPackageFields.suffix = @"'abc123'";
+    secondEventPackageFields.callbackParameters = @"{\"cFoo\":\"ceBar\"}";
+    secondEventPackageFields.partnerParameters = @"{\"pFoo\":\"peBar\"}";
+
+    [self testEventPackage:secondEventPackage fields:secondEventPackageFields eventToken:@"abc123"];
+}
+
+- (void)testDelayStartTimerFirst {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    [config setDelayStart:4];
+
+    ADJActivityHandlerConstructorState * cState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+
+    cState.sessionParametersActionsArray = @[^(ADJActivityHandler * activityHandler)
+    {
+        [activityHandler addSessionCallbackParameter:@"scpKey" value:@"scpValue"];
+        [activityHandler addSessionPartnerParameter:@"sppKey" value:@"sppValue"];
+    }];
+    //  create handler and start the first session
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getActivityHandler:cState];
+
     [NSThread sleepForTimeInterval:2.0];
 
     // test init values
-    [self checkInit:ADJEnvironmentSandbox logLevel:@"3"];
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.delayStartConfigured = YES;
 
-    // test first session start
-    [self checkFirstSession];
+    [self checkInitAndStart:initState];
 
-    // wait enough to fire the first cycle
+    [activityHandler applicationDidBecomeActive];
+    [activityHandler applicationDidBecomeActive];
+
+    // create the first Event object with callback and partner parameters
+    ADJEvent * firstEvent = [ADJEvent eventWithEventToken:@"event1"];
+
+    [firstEvent addCallbackParameter:@"keyCall" value:@"valueCall"];
+    [firstEvent addPartnerParameter:@"keyPartner" value:@"valuePartner"];
+
+    [activityHandler trackEvent:firstEvent];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // test session
+    ADJSessionState * subSesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    // foreground timer does not start XXX change so that fTimer does not pause
+    subSesssionState.foregroundTimerStarts = NO;
+    // delay start means it starts paused
+    subSesssionState.toSend = NO;
+    // sdk click handler does not start paused
+    subSesssionState.sdkClickHandlerAlsoPauses = NO;
+    // delay configured
+    subSesssionState.delayStart = @"4.0";
+    subSesssionState.subsessionCount = 2;
+
+    [self checkStartInternal:subSesssionState];
+
+    subSesssionState.delayStart = nil;
+    subSesssionState.sessionType = ADJSessionTypeNonSession;
+
+    [self checkStartInternal:subSesssionState];
+
+    // check that event package was added and tried to send
+    aTest(@"PackageHandler addPackage");
+    aTest(@"PackageHandler sendFirstPackage");
+
+    [NSThread sleepForTimeInterval:4.0];
+
+    aVerbose(@"Delay Start timer fired");
+
+    [self checkSendFirstPackages:YES internalState:[activityHandler internalState] activityStateCreated:YES pausing:NO];
+
+    [activityHandler sendFirstPackages];
+    [NSThread sleepForTimeInterval:1.0];
+
+    [self checkSendFirstPackages:NO internalState:[activityHandler internalState] activityStateCreated:YES pausing:NO];
+
+    // 1 session + 1 event
+    aiEquals(2, (int)[self.packageHandlerMock.packageQueue count]);
+
+    // get the first event
+    ADJActivityPackage * firstEventPackage = (ADJActivityPackage *) self.packageHandlerMock.packageQueue[1];
+
+    // create event package test
+    ADJPackageFields * firstPackageFields = [ADJPackageFields fields];
+
+    // set event test parameters
+    firstPackageFields.eventCount = @"1";
+    firstPackageFields.savedCallbackParameters = @{@"keyCall":@"valueCall"};
+    firstPackageFields.savedPartnerParameters = @{@"keyPartner":@"valuePartner"};
+    firstPackageFields.suffix = @"'event1'";
+
+    // test first event
+    [self testEventPackage:firstEventPackage fields:firstPackageFields eventToken:@"event1"];
+}
+
+- (void)testDelayStartSendFirst {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    [config setDelayStart:5];
+
+    //  create handler and start the first session
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // test init values
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.delayStartConfigured = YES;
+
+    [self checkInitAndStart:initState];
+
+    [activityHandler applicationDidBecomeActive];
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // test first subSession
+    ADJSessionState * subSesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    // foreground timer does not start
+    subSesssionState.foregroundTimerStarts = NO;
+    // delay start means it starts paused
+    subSesssionState.toSend = NO;
+    // sdk click handler does not start paused
+    subSesssionState.sdkClickHandlerAlsoPauses = NO;
+    // delay configured
+    subSesssionState.delayStart = @"5.0";
+    subSesssionState.subsessionCount = 2;
+
+    [self checkStartInternal:subSesssionState];
+
+    subSesssionState.delayStart = nil;
+    subSesssionState.sessionType = ADJSessionTypeNonSession;
+
+    [self checkStartInternal:subSesssionState];
+
+    [activityHandler sendFirstPackages];
+
     [NSThread sleepForTimeInterval:3.0];
 
-    [self checkTimerIsFired:YES];
+    anVerbose(@"Delay Start timer fired");
 
-    // end subsession to stop timer
-    //[activityHandler trackSubsessionEnd];
+    [self checkSendFirstPackages:YES internalState:[activityHandler internalState] activityStateCreated:YES pausing:NO];
 
-    // wait enough for a new cycle
-    //[NSThread sleepForTimeInterval:6.0];
+    [activityHandler sendFirstPackages];
+    [NSThread sleepForTimeInterval:1.0];
 
-    //[activityHandler trackSubsessionStart];
+    [self checkSendFirstPackages:NO internalState:[activityHandler internalState] activityStateCreated:YES pausing:NO];
+}
+
+- (void)testUpdateStart {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    [config setDelayStart:10.1];
+
+    //  create handler and start the first session
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // test init values
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.delayStartConfigured = YES;
+    [self checkInitAndStart:initState];
+    //[self checkInitTests:initState];
+
+    [activityHandler applicationDidBecomeActive];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    // test session
+    ADJSessionState * subSesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    // foreground timer does not start
+    subSesssionState.foregroundTimerStarts = NO;
+    // delay start means it starts paused
+    subSesssionState.toSend = NO;
+    // sdk click handler does not start paused
+    subSesssionState.sdkClickHandlerAlsoPauses = NO;
+    // delay configured
+    subSesssionState.delayStart = @"10.1";
+    subSesssionState.subsessionCount = 2;
+
+    [self checkStartInternal:subSesssionState];
+
+    //[self checkSendFirstPackages:YES internalState:[activityHandler internalState] activityStateCreated:YES pausing:NO];
+    // did not update and send packages
+    anTest(@"PackageHandler updatePackages");
+
+    [activityHandler applicationWillResignActive];
+    [NSThread sleepForTimeInterval:1.0];
+
+    [self checkEndSession];
+    [activityHandler teardown:NO];
+    activityHandler = nil;
+    [NSThread sleepForTimeInterval:1.0];
+
+    ADJActivityHandlerConstructorState * cState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+    cState.readActivityState = @"";
+    cState.isToUpdatePackages = YES;
+    id<ADJActivityHandler> restartActivityHandler = [self getActivityHandler:cState];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // test init values
+    ADJInitState * restartInitState = [[ADJInitState alloc] initWithActivityHandler:restartActivityHandler];
+
+    // delay start not configured because activity state is already created
+    restartInitState.updatePackages = YES;
+    restartInitState.activityStateAlreadyCreated = YES;
+    //restartInitState.readSessionParameters = @"";
+
+    ADJSessionState * restartSubSesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
+    restartSubSesssionState.subsessionCount = 3;
+    restartSubSesssionState.toSend = NO;
+
+    [self checkInitAndStart:restartInitState sessionState:restartSubSesssionState];
+}
+
+- (void)testLogLevel {
+    //  reseting to make the test order independent
+    [self reset];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    config.logLevel = ADJLogLevelVerbose;
+    config.logLevel = ADJLogLevelDebug;
+    config.logLevel = ADJLogLevelInfo;
+    config.logLevel = ADJLogLevelWarn;
+    config.logLevel = ADJLogLevelError;
+    config.logLevel = ADJLogLevelAssert;
+
+    aTest(@"ADJLogger setLogLevel: 1");
+    aTest(@"ADJLogger setLogLevel: 2");
+    aTest(@"ADJLogger setLogLevel: 3");
+    aTest(@"ADJLogger setLogLevel: 4");
+    aTest(@"ADJLogger setLogLevel: 5");
+    aTest(@"ADJLogger setLogLevel: 6");
+
+    config.logLevel = ADJLogLevelSuppress;
+    // chooses Assert because config object was not configured to allow suppress
+    aTest(@"ADJLogger setLogLevel: 6");
+
+    // init log level with assert because it was not configured to allow suppress
+    config = [self getConfig:@"production" appToken:@"qwerty123456" allowSuppressLogLevel:NO initLogLevel:@"6"];
+
+    config.logLevel = ADJLogLevelSuppress;
+    // chooses Assert because config object was not configured to allow suppress
+    aTest(@"ADJLogger setLogLevel: 6");
+
+    // init with info because it's sandbox
+    config = [self getConfig:@"sandbox" appToken:@"qwerty123456" allowSuppressLogLevel:YES initLogLevel:@"3"];
+
+    config.logLevel = ADJLogLevelSuppress;
+    // chooses Suppress because config object was configured to allow suppress
+    aTest(@"ADJLogger setLogLevel: 7");
+
+    // init with info because it's sandbox
+    config = [self getConfig:@"production" appToken:@"qwerty123456" allowSuppressLogLevel:YES initLogLevel:@"7"];
+
+    config.logLevel = ADJLogLevelAssert;
+    // chooses Suppress because config object was configured to allow suppress
+    aTest(@"ADJLogger setLogLevel: 7");
+}
+
+- (void)testTeardown {
+    //  reseting to make the test order independent
+    [self reset];
+
+    //  change the timer defaults
+    [ADJAdjustFactory setTimerInterval:4];
+    //[ADJAdjustFactory setTimerStart:4];
+
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    [config setDelayStart:4];
+    [config setSendInBackground:YES];
+
+    //  create handler and start the first session
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    // test init values
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    initState.delayStartConfigured = YES;
+    initState.sendInBackgroundConfigured = YES;
+    initState.startsSending = NO;
+    initState.sdkClickHandlerAlsoStartsPaused = NO;
+    initState.foregroundTimerCycle = 4;
+
+    // test session
+    ADJSessionState * sesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    sesssionState.sendInBackgroundConfigured = YES;
+    sesssionState.foregroundTimerStarts = NO;
+    sesssionState.toSend = NO;
+    sesssionState.sdkClickHandlerAlsoPauses = NO;
+
+    [self checkInitAndStart:initState sessionState:sesssionState];
 
     //[NSThread sleepForTimeInterval:1.0];
 
-    //[self checkTimerIsFired:NO];
+    [activityHandler teardown:NO];
+    aVerbose(@"ADJActivityHandler teardown");
+
+    aTest(@"AttributionHandler teardown");
+    aTest(@"PackageHandler teardown, deleteState: 0");
+    aTest(@"SdkClickHandler teardown");
+
+    // when timer is cancel, it tries to resume what was halted
+    //aVerbose(@"Foreground timer dealloc");
+
+    [NSThread sleepForTimeInterval:5.0];
+
+    //[self checkEndSession];
+    //[NSThread sleepForTimeInterval:5.0];
 }
 
-- (void)checkInit:(NSString *)environment
-         logLevel:(NSString *)logLevel
+- (NSURL*)getUniversalLinkUrl:(NSString*)path
 {
-    [self checkInit:environment logLevel:logLevel readActivityState:nil readAttribution:nil];
+    return [NSURL URLWithString:[NSString
+                                 stringWithFormat:@"https://[hash].ulink.adjust.com/ulink%@", path]];
 }
 
-- (void)checkInit:(NSString *)environment
-         logLevel:(NSString *)logLevel
-readActivityState:(NSString *)readActivityState
-  readAttribution:(NSString *)readAttribution
+- (NSURL*)getUniversalLinkUrl:(NSString*)path
+                        query:(NSString*)query
+                     fragment:(NSString*)fragment
 {
+    return [NSURL URLWithString:[NSString
+                                 stringWithFormat:@"https://[hash].ulink.adjust.com/ulink%@%@%@", path, query, fragment]];
+}
 
-    // check environment level
-    if ([environment isEqualToString:ADJEnvironmentSandbox]) {
-        aAssert(@"SANDBOX: Adjust is running in Sandbox mode. Use this setting for testing. Don't forget to set the environment to `production` before publishing");
-    } else if ([environment isEqualToString:ADJEnvironmentProduction]) {
-        aAssert(@"PRODUCTION: Adjust is running in Production mode. Use this setting only for the build that you want to publish. Set the environment to `sandbox` if you want to test your app!");
+- (void)checkForegroundTimerFired:(BOOL)timerFired
+{
+    // timer fired
+    if (timerFired) {
+        aVerbose(@"Foreground timer fired");
     } else {
-        aFail();
+        anVerbose(@"Foreground timer fired");
+    }
+}
+
+- (void)checkInitAndStart:(ADJInitState *)initState {
+    [self checkInitTests:initState];
+
+    [self checkFirstSession];
+}
+
+- (void)checkInitAndStartTestsWithHandler:(ADJActivityHandler *)activityHandler {
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    [self checkInitTests:initState];
+
+    [self checkFirstSession];
+}
+
+- (void)checkInitAndStart:(ADJInitState *)initState
+             sessionState:(ADJSessionState *)sessionState
+{
+    [self checkInitTests:initState];
+
+    [self checkStartInternal:sessionState];
+}
+
+- (void)checkInitAndStartTestsWithHandler:(ADJActivityHandler *)activityHandler
+                             sessionState:(ADJSessionState *)sessionState
+{
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    [self checkInitTests:initState];
+
+    [self checkStartInternal:sessionState];
+}
+
+
+- (void)checkInitTestsWithHandler:(ADJActivityHandler *)activityHandler {
+    ADJInitState * initState = [[ADJInitState alloc] initWithActivityHandler:activityHandler];
+    [self checkInitTests:initState];
+}
+
+- (void)checkInitTests:(ADJInitState *)initState
+{
+    if (initState.readCallbackParameters == nil) {
+        aVerbose(@"Session Callback parameters file not found");
+    } else {
+        aDebug([@"Read Session Callback parameters: " stringByAppendingString:initState.readCallbackParameters]);
+    }
+    if (initState.readPartnerParameters == nil) {
+        aVerbose(@"Session Partner parameters file not found");
+    } else {
+        aDebug([@"Read Session Partner parameters: " stringByAppendingString:initState.readPartnerParameters]);
     }
 
-    // check log level
-    aTest([@"ADJLogger setLogLevel: " stringByAppendingString:logLevel]);
+    // check event buffering
+    if (initState.eventBufferingIsEnabled) {
+        aInfo(@"Event buffering is enabled");
+    } else {
+        anInfo(@"Event buffering is enabled");
+    }
 
-    // check read files
-    [self checkReadFiles:readActivityState readAttribution:readAttribution];
+    // check default tracker
+    if (initState.defaultTracker != nil) {
+        NSString * defaultTrackerLog = [NSString stringWithFormat:@"Default tracker: '%@'", initState.defaultTracker];
+        aInfo(defaultTrackerLog);
+    }
+
+    NSString * foregroundLog = [NSString stringWithFormat:@"Foreground timer configured to fire after %d.0 seconds of starting and cycles every %d.0 seconds", initState.foregroundTimerStart, initState.foregroundTimerCycle];
+    aVerbose(foregroundLog);
+
+    if (initState.sendInBackgroundConfigured) {
+        aInfo(@"Send in background configured");
+    } else {
+        anInfo(@"Send in background configured");
+    }
+
+    if (initState.delayStartConfigured) {
+        aInfo(@"Delay start configured");
+        aTrue(initState.internalState.delayStart);
+    } else {
+        anInfo(@"Delay start configured");
+        aFalse(initState.internalState.delayStart);
+    }
+
+    if (initState.startsSending) {
+        aTest(@"PackageHandler initWithActivityHandler, startsSending: 1");
+    } else {
+        aTest(@"PackageHandler initWithActivityHandler, startsSending: 0");
+    }
+
+    if (initState.updatePackages) {
+        [self checkUpdatePackages:initState.internalState activityStateCreated:initState.activityStateAlreadyCreated];
+    }
+
+    if (initState.startsSending) {
+        aTest(@"AttributionHandler initWithActivityHandler, startsSending: 1");
+        aTest(@"SdkClickHandler initWithStartsSending, startsSending: 1");
+    } else {
+        aTest(@"AttributionHandler initWithActivityHandler, startsSending: 0");
+        if (initState.sdkClickHandlerAlsoStartsPaused) {
+            aTest(@"SdkClickHandler initWithStartsSending, startsSending: 0");
+        } else {
+            aTest(@"SdkClickHandler initWithStartsSending, startsSending: 1");
+        }
+    }
+}
+
+- (void)checkEndSession
+{
+    ADJEndSessionState * endState = [[ADJEndSessionState alloc] init];
+    [self checkEndSession:endState];
+}
+
+- (void)checkEndSession:(ADJEndSessionState *)endState
+{
+    if (endState.checkOnPause) {
+        [self checkOnPause:endState.forgroundAlreadySuspended
+     backgroundTimerStarts:endState.backgroundTimerStarts];
+    }
+
+    if (endState.pausing) {
+        [self checkHandlerStatus:endState.pausing
+         eventBufferingIsEnabled:endState.eventBufferingEnabled
+       sdkClickHandlerAlsoPauses:YES];
+    }
+
+    if (endState.updateActivityState) {
+        aDebug(@"Wrote Activity state: ");
+    } else {
+        anDebug(@"Wrote Activity state: ");
+    }
+}
+
+- (void) checkOnPause:(BOOL)foregroundAlreadySuspended
+backgroundTimerStarts:(BOOL)backgroundTimerStarts
+{
+    // stop foreground timer
+    if (foregroundAlreadySuspended) {
+        aVerbose(@"Foreground timer is already suspended");
+    } else {
+        aVerbose(@"Foreground timer suspended");
+    }
+
+    // start background timer
+    if (backgroundTimerStarts) {
+        aVerbose(@"Background timer starting.");
+    } else {
+        anVerbose(@"Background timer starting.");
+    }
+
+    // starts the subsession
+    aVerbose(@"Subsession end");
 }
 
 - (void)checkReadFiles:(NSString *)readActivityState
@@ -1519,124 +3010,508 @@ readActivityState:(NSString *)readActivityState
     }
 }
 
-- (void)checkFirstSession:(BOOL)paused
+- (ADJConfig *)getConfig {
+    return [self getConfig:@"sandbox" appToken:@"qwerty123456" allowSuppressLogLevel:NO initLogLevel:@"3"];
+}
+
+- (ADJConfig *)getConfig:(NSString *)environment
+                appToken:(NSString *)appToken
+    allowSuppressLogLevel:(BOOL)allowSuppressLogLevel
+            initLogLevel:(NSString *)initLogLevel
 {
-    // test if package handler started paused
-    if (paused) {
-        aTest(@"PackageHandler initWithActivityHandler, paused: 1");
+    ADJConfig * config = nil;
+
+    if (allowSuppressLogLevel) {
+        config = [ADJConfig configWithAppToken:appToken environment:environment allowSuppressLogLevel:YES];
     } else {
-        aTest(@"PackageHandler initWithActivityHandler, paused: 0");
+        config = [ADJConfig configWithAppToken:appToken environment:environment];
     }
 
-    [self checkNewSession:paused
-             sessionCount:1
-               eventCount:0
-      timerAlreadyStarted:NO];
-}
-
-- (void)checkFirstSession
-{
-    [self checkFirstSession:NO];
-}
-
-- (void)checkNewSession:(BOOL)paused
-           sessionCount:(int)sessionCount
-             eventCount:(int)eventCount
-{
-    [self checkNewSession:paused sessionCount:sessionCount eventCount:eventCount timerAlreadyStarted:NO];
-}
-- (void)checkNewSession:(BOOL)paused
-           sessionCount:(int)sessionCount
-             eventCount:(int)eventCount
-    timerAlreadyStarted:(BOOL)timerAlreadyStarted
-{
-    // when a session package is being sent the attribution handler should resume sending
-    if (paused) {
-        aTest(@"AttributionHandler pauseSending");
-    } else {
-        aTest(@"AttributionHandler resumeSending");
+    if (config != nil) {
+        if (initLogLevel != nil) {
+            aTest([@"ADJLogger setLogLevel: " stringByAppendingString:initLogLevel]);
+        }
+        if ([environment isEqualToString:ADJEnvironmentSandbox]) {
+            aAssert(@"SANDBOX: Adjust is running in Sandbox mode. Use this setting for testing. Don't forget to set the environment to `production` before publishing");
+        } else if ([environment isEqualToString:ADJEnvironmentProduction]) {
+            aAssert(@"PRODUCTION: Adjust is running in Production mode. Use this setting only for the build that you want to publish. Set the environment to `sandbox` if you want to test your app!");
+        } else {
+            aFail();
+        }
     }
 
-    // when a session package is being sent the package handler should resume sending
-    if (paused) {
-        aTest(@"PackageHandler pauseSending");
-    } else {
-        aTest(@"PackageHandler resumeSending");
-    }
-
-    // if the package was build, it was sent to the Package Handler
-    aTest(@"PackageHandler addPackage");
-
-    // after adding, the activity handler ping the Package handler to send the package
-    aTest(@"PackageHandler sendFirstPackage");
-
-    // after sending a package saves the activity state
-    NSString * aStateWrote = [NSString stringWithFormat:@"Wrote Activity state: ec:%d sc:%d ssc:1", eventCount, sessionCount];
-    aDebug(aStateWrote);
-
-    [self checkTimerIsFired:!(paused || timerAlreadyStarted)];
+    return config;
 }
 
-- (void)checkSubsession:(int)sessionCount
-       subSessionCount:(int)subsessionCount
-    timerAlreadyStarted:(BOOL)timerAlreadyStarted
+- (id<ADJActivityHandler>)startAndCheckFirstSession:(ADJConfig *)config
+{
+    // start activity handler with config
+    id<ADJActivityHandler> activityHandler = [self getFirstActivityHandler:config];
+
+    [NSThread sleepForTimeInterval:2.0];
+
+    [self checkInitAndStartTestsWithHandler:activityHandler];
+
+    return activityHandler;
+}
+
+- (void)stopActivity:(id<ADJActivityHandler>)activityHandler {
+    // stop activity
+    [activityHandler applicationWillResignActive];
+
+    ADJInternalState * internalState = [activityHandler internalState];
+
+    // goes to the background
+    aTrue([internalState isBackground]);
+}
+
+- (id<ADJActivityHandler>)getFirstActivityHandler:(ADJConfig *)config
+{
+    ADJActivityHandlerConstructorState * cState = [[ADJActivityHandlerConstructorState alloc] initWithConfig:config];
+    return [self getActivityHandler:cState];
+}
+
+- (id<ADJActivityHandler>)getActivityHandler:(ADJActivityHandlerConstructorState *)cState
+{
+    id<ADJActivityHandler> activityHandler = [ADJActivityHandler handlerWithConfig:cState.config
+                                                     sessionParametersActionsArray:cState.sessionParametersActionsArray];
+
+    if (activityHandler != nil) {
+        aTest(@"ADJLogger lockLogLevel");
+
+        // check if files are read in constructor
+        [self checkReadFiles:cState.readActivityState readAttribution:cState.readAttribution];
+
+        ADJInternalState * internalState = [activityHandler internalState];
+        // test default values
+        aiEquals(cState.startEnabled, [internalState isEnabled]);
+        aTrue([internalState isOnline]);
+        aTrue([internalState isBackground]);
+        aTrue([internalState isToStartNow]);
+        aiEquals(cState.isToUpdatePackages, [internalState isToUpdatePackages]);
+    }
+
+    return activityHandler;
+}
+
+- (void)checkStartDisable {
+    anTest(@"AttributionHandler resumeSending");
+    anTest(@"PackageHandler resumeSending");
+    anTest(@"SdkClickHandler resumeSending");
+    anTest(@"AttributionHandler pauseSending");
+    anTest(@"PackageHandler pauseSending");
+    anTest(@"SdkClickHandler pauseSending");
+    anTest(@"PackageHandler addPackage");
+    anTest(@"PackageHandler sendFirstPackage");
+    anVerbose(@"Started subsession");
+    anVerbose(@"Time span since last activity too short for a new subsession");
+    anError(@"Time travel!");
+    anDebug(@"Wrote Activity state: ");
+    anTest(@"AttributionHandler getAttribution");
+    [self checkForegroundTimerFired:NO];
+}
+
+- (void)checkFirstSession {
+    ADJSessionState * sesssionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+    [self checkStartInternal:sesssionState];
+}
+
+- (void)checkSubSession:(NSInteger)sessionCount
+        subsessionCount:(NSInteger)subsessionCount
  getAttributionIsCalled:(BOOL)getAttributionIsCalled
 {
-    [self checkSubsession:sessionCount subSessionCount:subsessionCount];
+    ADJSessionState * subSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSubSession];
 
-    if (getAttributionIsCalled) {
-        aTest(@"AttributionHandler getAttribution");
-    } else {
-        anTest(@"AttributionHandler getAttribution");
+    subSessionState.sessionCount = sessionCount;
+    subSessionState.subsessionCount = subsessionCount;
+    subSessionState.getAttributionIsCalled = [NSNumber numberWithBool:getAttributionIsCalled];
+    subSessionState.foregroundTimerAlreadyStarted = YES;
+    subSessionState.toSend = YES;
+    [self checkStartInternal:subSessionState];
+}
+
+- (void)checkFurtherSessions:(NSInteger)sessionCount
+ getAttributionIsCalled:(BOOL)getAttributionIsCalled
+{
+    ADJSessionState * furtherSessionState = [ADJSessionState sessionStateWithSessionType:ADJSessionTypeSession];
+
+    furtherSessionState.sessionCount = sessionCount;
+    furtherSessionState.timerAlreadyStarted = YES;
+    furtherSessionState.getAttributionIsCalled = [NSNumber numberWithBool:getAttributionIsCalled];
+    furtherSessionState.foregroundTimerAlreadyStarted = YES;
+    furtherSessionState.toSend = YES;
+
+    [self checkStartInternal:furtherSessionState];
+}
+
+- (void)checkAppBecomeActive:(ADJSessionState *)sessionState {
+    [self checkDelayStart:sessionState];
+
+    // check applicationDidBecomeActive
+    [self checkApplicationDidBecomeActive:sessionState];
+
+    [self checkStartInternal:sessionState];
+}
+
+- (void)checkStartInternal:(ADJSessionState *)sessionState {
+    // update Handlers Status
+    [self checkHandlerStatus:!sessionState.toSend
+     eventBufferingIsEnabled:sessionState.eventBufferingIsEnabled
+     sdkClickHandlerAlsoPauses:sessionState.sdkClickHandlerAlsoPauses];
+
+    // process Session
+    switch (sessionState.sessionType) {
+        case ADJSessionTypeSession:
+        {
+            // if the package was build, it was sent to the Package Handler
+            aTest(@"PackageHandler addPackage");
+
+            // after adding, the activity handler ping the Package handler to send the package
+            aTest(@"PackageHandler sendFirstPackage");
+            break;
+        }
+        case ADJSessionTypeSubSession:
+        {
+            // test the subsession message
+            NSString * startedSubsessionLog = [NSString stringWithFormat:@"Started subsession %ld of session %ld",
+                                               sessionState.subsessionCount, sessionState.sessionCount];
+            aVerbose(startedSubsessionLog);
+            break;
+        }
+        case ADJSessionTypeNonSession:
+        {
+            // stopped for a short time, not enough for a new sub subsession
+            aVerbose(@"Time span since last activity too short for a new subsession");
+            break;
+        }
+        case ADJSessionTypeTimeTravel:
+        {
+            aError(@"Time travel!");
+            break;
+        }
     }
 
-    [self checkTimerIsFired:!timerAlreadyStarted];
-}
-
-- (void)checkSubsession:(int)sessionCount
-        subSessionCount:(int)subsessionCount
-    timerAlreadyStarted:(BOOL)timerAlreadyStarted
-{
-    [self checkSubsession:sessionCount subSessionCount:subsessionCount];
-
-    [self checkTimerIsFired:!timerAlreadyStarted];
-}
-
-- (void)checkSubsession:(int)sessionCount
-        subSessionCount:(int)subsessionCount
-{
-    // test the new sub session
-    aTest(@"PackageHandler resumeSending");
-
-    // save activity state
-    NSString * aStateWrote = [NSString stringWithFormat:@"Wrote Activity state: ec:0 sc:%d ssc:%d", sessionCount, subsessionCount];
-    aDebug(aStateWrote);
-    //aDebug(@"Wrote Activity state: ec:0 sc:1 ssc:2");
-
-    if (subsessionCount > 1) {
-        // test the subsession message
-        NSString * subsessionStarted = [NSString stringWithFormat:@"Started subsession %d of session %d", subsessionCount, sessionCount];
-        aInfo(subsessionStarted);
-    } else {
-        // test the subsession message
-        anInfo(@"Started subsession ");
+    // after processing the session, writes the activity state
+    if (sessionState.sessionType != ADJSessionTypeNonSession) {
+        NSString * wroteActivityLog = [NSString stringWithFormat:@"Wrote Activity state: ec:%ld sc:%ld ssc:%ld",
+                                       sessionState.eventCount, sessionState.sessionCount, sessionState.subsessionCount];
+        aDebug(wroteActivityLog);
+    }
+    // check Attribution State
+    if (sessionState.getAttributionIsCalled != nil) {
+        if ([sessionState.getAttributionIsCalled boolValue]) {
+            aTest(@"AttributionHandler getAttribution");
+        } else {
+            anTest(@"AttributionHandler getAttribution");
+        }
     }
 }
 
-- (void)checkEndSession
-{
-    aTest(@"PackageHandler pauseSending");
-    aTest(@"AttributionHandler pauseSending");
-    aDebug(@"Wrote Activity state:");
-}
-
-- (void)checkTimerIsFired:(BOOL)timerFired
-{
-    if(timerFired) {
-        aDebug(@"Session timer fired");
+- (void)checkApplicationDidBecomeActive:(ADJSessionState *)sessionState {
+    // stops background timer
+    if (sessionState.sendInBackgroundConfigured) {
+        aVerbose(@"Background timer canceled");
     } else {
-        anDebug(@"Session timer fired");
+        anVerbose(@"Background timer canceled");
+    }
+
+    // start foreground timer
+    if (sessionState.foregroundTimerStarts) {
+        if (sessionState.foregroundTimerAlreadyStarted) {
+            aVerbose(@"Foreground timer is already started");
+        } else {
+            aVerbose(@"Foreground timer starting");
+        }
+    } else {
+        anVerbose(@"Foreground timer is already started");
+        anVerbose(@"Foreground timer starting");
+    }
+
+    // starts the subsession
+    if (sessionState.startSubSession) {
+        aVerbose(@"Subsession start");
+    } else {
+        anVerbose(@"Subsession start");
     }
 }
 
+- (void)checkHandlerStatus:(BOOL)pausing
+{
+    [self checkHandlerStatus:pausing eventBufferingIsEnabled:NO sdkClickHandlerAlsoPauses:YES];
+}
+
+- (void)checkHandlerStatus:(BOOL)pausing
+ sdkClickHandlerAlsoPauses:(BOOL)sdkClickHandlerAlsoPauses
+
+{
+    [self checkHandlerStatus:pausing eventBufferingIsEnabled:NO sdkClickHandlerAlsoPauses:sdkClickHandlerAlsoPauses];
+}
+
+
+- (void)checkHandlerStatus:(BOOL)pausing
+   eventBufferingIsEnabled:(BOOL)eventBufferingIsEnabled
+ sdkClickHandlerAlsoPauses:(BOOL)sdkClickHandlerAlsoPauses
+{
+    if (pausing) {
+        aTest(@"AttributionHandler pauseSending");
+        aTest(@"PackageHandler pauseSending");
+        if (sdkClickHandlerAlsoPauses) {
+            aTest(@"SdkClickHandler pauseSending");
+        } else {
+            aTest(@"SdkClickHandler resumeSending");
+        }
+    } else {
+        aTest(@"AttributionHandler resumeSending");
+        aTest(@"PackageHandler resumeSending");
+        aTest(@"SdkClickHandler resumeSending");
+        if (!eventBufferingIsEnabled) {
+            aTest(@"PackageHandler sendFirstPackage");
+        }
+    }
+}
+
+- (void)checkHandlerStatusNotCalled
+{
+    anTest(@"AttributionHandler pauseSending");
+    anTest(@"PackageHandler pauseSending");
+    anTest(@"SdkClickHandler pauseSending");
+    anTest(@"AttributionHandler resumeSending");
+    anTest(@"PackageHandler resumeSending");
+    anTest(@"SdkClickHandler resumeSending");
+}
+
+- (void)checkFinishTasks:(NSObject<AdjustDelegate> *)delegateTest
+attributionDelegatePresent:(BOOL)attributionDelegatePresent
+eventSuccessDelegatePresent:(BOOL)eventSuccessDelegatePresent
+eventFailureDelegatePresent:(BOOL)eventFailureDelegatePresent
+sessionSuccessDelegatePresent:(BOOL)sessionSuccessDelegatePresent
+sessionFailureDelegatePresent:(BOOL)sessionFailureDelegatePresent
+{
+    // create the config to start the session
+    ADJConfig * config = [self getConfig];
+
+    // set delegate
+    [config setDelegate:delegateTest];
+
+    if (attributionDelegatePresent) {
+        aDebug(@"Delegate implements adjustAttributionChanged");
+    } else {
+        anDebug(@"Delegate implements adjustAttributionChanged");
+    }
+    if (eventSuccessDelegatePresent) {
+        aDebug(@"Delegate implements adjustEventTrackingSucceeded");
+    } else {
+        anDebug(@"Delegate implements adjustEventTrackingSucceeded");
+    }
+    if (eventFailureDelegatePresent) {
+        aDebug(@"Delegate implements adjustEventTrackingFailed");
+    } else {
+        anDebug(@"Delegate implements adjustEventTrackingFailed");
+    }
+    if (sessionSuccessDelegatePresent) {
+        aDebug(@"Delegate implements adjustSessionTrackingSucceeded");
+    } else {
+        anDebug(@"Delegate implements adjustSessionTrackingSucceeded");
+    }
+    if (sessionFailureDelegatePresent) {
+        aDebug(@"Delegate implements adjustSessionTrackingFailed");
+    } else {
+        anDebug(@"Delegate implements adjustSessionTrackingFailed");
+    }
+
+    //  create handler and start the first session
+    id<ADJActivityHandler> activityHandler = [self startAndCheckFirstSession:config];
+
+    // test first session package
+    ADJActivityPackage * firstSessionPackage = self.packageHandlerMock.packageQueue[0];
+
+    // create activity package test
+    ADJPackageFields * firstSessionPackageFields = [ADJPackageFields fields];
+
+    firstSessionPackageFields.hasResponseDelegate =
+        attributionDelegatePresent ||
+        eventFailureDelegatePresent ||
+        eventSuccessDelegatePresent ||
+        sessionFailureDelegatePresent ||
+        sessionSuccessDelegatePresent;
+
+    // test first session
+    [self testPackageSession:firstSessionPackage fields:firstSessionPackageFields sessionCount:@"1"];
+
+    // simulate a successful session
+    ADJSessionResponseData * successSessionResponseData = [ADJResponseData buildResponseData:firstSessionPackage];
+    successSessionResponseData.success = YES;
+
+    [activityHandler finishedTracking:successSessionResponseData];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // attribution handler should always receive the session response
+    aTest(@"AttributionHandler checkSessionResponse");
+    // the first session does not trigger the event response delegate
+    anDebug(@"Launching success event tracking delegate");
+    anDebug(@"Launching failed event tracking delegate");
+
+    [activityHandler launchSessionResponseTasks:successSessionResponseData];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // if present, the first session triggers the success session delegate
+    if (sessionSuccessDelegatePresent) {
+        aDebug(@"Launching success session tracking delegate");
+        aDebug(@"Launching in the background for testing");
+        aTest(@"ADJTrackingSucceededDelegate adjustSessionTrackingSucceeded");
+    } else {
+        anDebug(@"Launching success session tracking delegate");
+    }
+    // it doesn't trigger the failure session delegate
+    anDebug(@"Launching failed session tracking delegate");
+
+    // simulate a failure session
+    ADJSessionResponseData * failureSessionResponseData = [ADJResponseData buildResponseData:firstSessionPackage];
+    failureSessionResponseData.success = NO;
+
+    [activityHandler launchSessionResponseTasks:failureSessionResponseData];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // it doesn't trigger the success session delegate
+    anDebug(@"Launching success session tracking delegate");
+
+    // if present, the first session triggers the failure session delegate
+    if (sessionFailureDelegatePresent) {
+        aDebug(@"Launching failed session tracking delegate");
+        aDebug(@"Launching in the background for testing");
+        aTest(@"ADJTrackingFailedDelegate adjustSessionTrackingFailed");
+    } else {
+        anDebug(@"Launching failed session tracking delegate");
+    }
+
+    // test success event response data
+    [activityHandler trackEvent:[ADJEvent eventWithEventToken:@"abc123"]];
+    [NSThread sleepForTimeInterval:1.0];
+
+    ADJActivityPackage * eventPackage = self.packageHandlerMock.packageQueue[1];
+    ADJEventResponseData * eventSuccessResponseData = [ADJResponseData buildResponseData:eventPackage];
+    eventSuccessResponseData.success = YES;
+
+    [activityHandler finishedTracking:eventSuccessResponseData];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // attribution handler should never receive the event response
+    anTest(@"AttributionHandler checkSessionResponse");
+
+    // if present, the success event triggers the success event delegate
+    if (eventSuccessDelegatePresent) {
+        aDebug(@"Launching success event tracking delegate");
+        aDebug(@"Launching in the background for testing");
+        aTest(@"ADJTrackingSucceededDelegate adjustEventTrackingSucceeded");
+    } else {
+        anDebug(@"Launching success event tracking delegate");
+    }
+    // it doesn't trigger the failure event delegate
+    anDebug(@"Launching failed event tracking delegate");
+
+    // test failure event response data
+    ADJEventResponseData * eventFailureResponseData = [ADJResponseData buildResponseData:eventPackage];
+    eventFailureResponseData.success = NO;
+
+    [activityHandler finishedTracking:eventFailureResponseData];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // attribution handler should never receive the event response
+    anTest(@"AttributionHandler checkSessionResponse");
+
+    // if present, the failure event triggers the failure event delegate
+    if (eventFailureDelegatePresent) {
+        aDebug(@"Launching failed event tracking delegate");
+        aDebug(@"Launching in the background for testing");
+        aTest(@"ADJTrackingFailedDelegate adjustEventTrackingFailed");
+    } else {
+        anDebug(@"Launching failed event tracking delegate");
+    }
+    // it doesn't trigger the success event delegate
+    anDebug(@"Launching success event tracking delegate");
+
+    // test click
+    NSURL* attributions = [NSURL URLWithString:@"AdjustTests://example.com/path/inApp?adjust_tracker=trackerValue&other=stuff&adjust_campaign=campaignValue&adjust_adgroup=adgroupValue&adjust_creative=creativeValue"];
+
+    [activityHandler appWillOpenUrl:attributions];
+
+    [NSThread sleepForTimeInterval:1.0];
+
+    aTest(@"SdkClickHandler sendSdkClick");
+
+    // test sdk_click response data
+    ADJActivityPackage * sdkClickPackage = self.sdkClickHandlerMock.packageQueue[0];
+    ADJClickResponseData * sdkClickResponseData = [ADJResponseData buildResponseData:sdkClickPackage];
+
+    [activityHandler finishedTracking:sdkClickResponseData];
+    [NSThread sleepForTimeInterval:1.0];
+
+    // attribution handler should never receive the click response
+    anTest(@"AttributionHandler checkSessionResponse");
+    // it doesn't trigger the any event delegate
+    anDebug(@"Launching success event tracking delegate");
+    anDebug(@"Launching failed event tracking delegate");
+}
+
+- (void)checkDelayStart:(ADJSessionState *)sessionState {
+    if (sessionState.delayStart == nil) {
+        anWarn(@"Waiting");
+        return;
+    }
+
+    if ([sessionState.delayStart isEqualToString:@"10.1"]) {
+        aWarn(@"Delay start of 10.1 seconds bigger than max allowed value of 10.0 seconds");
+        sessionState.delayStart = @"10.0";
+    }
+
+    NSString * waitingLog = [NSString stringWithFormat:@"Waiting %@ seconds before starting first session", sessionState.delayStart];
+    aInfo(waitingLog);
+
+    NSString * delayStartLog = [NSString stringWithFormat:@"Delay Start timer starting. Launching in %@ seconds", sessionState.delayStart];
+
+    aVerbose(delayStartLog);
+
+    if (sessionState.activityStateCreated) {
+        aDebug(@"Wrote Activity state");
+    }
+}
+
+- (void)checkSendFirstPackages:(BOOL)delayStart
+                 internalState:(ADJInternalState *)internalState
+          activityStateCreated:(BOOL)activityStateCreated
+                       pausing:(BOOL)pausing
+{
+    if (!delayStart) {
+        aInfo(@"Start delay expired or never configured");
+        anTest(@"PackageHandler updatePackages");
+        return;
+    }
+    anInfo(@"Start delay expired or never configured");
+
+    // update packages
+    aTest(@"PackageHandler updatePackages");
+    aFalse(internalState.updatePackages);
+    if (activityStateCreated) {
+        aDebug(@"Wrote Activity state");
+    }
+    // no longer is in delay start
+    aFalse(internalState.delayStart);
+
+    // cancel timer
+    aVerbose(@"Delay Start timer canceled");
+
+    [self checkHandlerStatus:pausing sdkClickHandlerAlsoPauses:NO];
+}
+
+- (void)checkUpdatePackages:(ADJInternalState *)internalState
+     activityStateCreated:(BOOL)activityStateCreated
+{
+    aTest(@"PackageHandler updatePackages");
+    aFalse(internalState.updatePackages);
+    if (activityStateCreated) {
+        aDebug(@"Wrote Activity state");
+    } else {
+        anDebug(@"Wrote Activity state");
+    }
+}
 @end

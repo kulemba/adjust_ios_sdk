@@ -11,6 +11,8 @@
 
 static ADJResponseType responseTypeInternal;
 static NSURLRequest * lastRequest = nil;
+static BOOL timeoutMockInternal = NO;
+static double waitingTimeInternal = 0.0;
 
 @implementation NSURLConnection(NSURLConnectionSynchronousLoadingMock)
 
@@ -21,6 +23,14 @@ static NSURLRequest * lastRequest = nil;
     lastRequest = request;
     NSInteger statusCode = 200;
     NSString * sResponse;
+
+    if (timeoutMockInternal) {
+        [NSThread sleepForTimeInterval:10.0];
+    }
+
+    if (waitingTimeInternal != 0) {
+        [NSThread sleepForTimeInterval:waitingTimeInternal];
+    }
 
     if (responseTypeInternal == ADJResponseTypeNil) {
         return nil;
@@ -43,9 +53,9 @@ static NSURLRequest * lastRequest = nil;
     //  build response
     (*response) = [[NSHTTPURLResponse alloc] initWithURL:[[NSURL alloc] init] statusCode:statusCode HTTPVersion:@"" headerFields:nil];
 
-    NSData *responseData = [sResponse dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data = [sResponse dataUsingEncoding:NSUTF8StringEncoding];
 
-    return responseData;
+    return data;
 
     /*
     NSInteger statusCode;
@@ -73,9 +83,9 @@ static NSURLRequest * lastRequest = nil;
     //  build response
     (*response) = [[NSHTTPURLResponse alloc] initWithURL:[[NSURL alloc] init] statusCode:statusCode HTTPVersion:@"" headerFields:nil];
 
-    NSData *responseData = [sResponse dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *data = [sResponse dataUsingEncoding:NSUTF8StringEncoding];
 
-    return responseData;
+    return data;
      */
 }
 
@@ -88,9 +98,18 @@ static NSURLRequest * lastRequest = nil;
     return lastRequest;
 }
 
++ (void)setTimeoutMock:(BOOL)enable {
+    timeoutMockInternal = enable;
+}
++ (void)setWaitingTime:(double)waitingTime {
+    waitingTimeInternal = waitingTime;
+}
+
 + (void)reset {
     responseTypeInternal = ADJResponseTypeNil;
     lastRequest = nil;
+    timeoutMockInternal = NO;
+    waitingTimeInternal = 0.0;
 }
 
 @end
